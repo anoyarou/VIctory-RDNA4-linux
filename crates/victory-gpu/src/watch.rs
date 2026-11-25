@@ -702,14 +702,16 @@ fn aliases(at: usize) -> Vec<usize> {
 static BESIDE: std::sync::RwLock<Option<std::collections::HashMap<usize, (usize, usize)>>> =
     std::sync::RwLock::new(None);
 
-/// Whether copy-back writes through views of ours ([`with_beside`]): on
-/// under Wine unless `VICTORY_BESIDE=0`, elsewhere only with `=1`.
+/// Whether copy-back writes through views of ours ([`with_beside`]): only
+/// with `VICTORY_BESIDE=1`. Run 30 here (standing still, against run 29):
+/// guard opening went from 229 to 67 ms a frame summed, but noting the
+/// writes cost as much again and more pieces were compared and differed;
+/// the frame was 515 ms against 501. Off until that is understood.
 pub(crate) fn beside_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| match std::env::var("VICTORY_BESIDE").ok().as_deref() {
-        Some("0") => false,
         Some("1") => true,
-        _ => on_wine(),
+        _ => false,
     })
 }
 
