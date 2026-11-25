@@ -477,7 +477,62 @@ struct Guards {
     /// asynchronous and land after the call that asked for it returned, and
     /// the kernel does not fault into our handler, it fails. Until then
     /// they are not made read-only, and every check reports them written.
-    pins: Vec<(usize, usize, std::time::Instant)>,
+    pins: Pins,
+}
+
+/// The blocks of [`Guards::pins`]. Small ranges are kept block by block, so
+/// asking about a block is one lookup and a block pinned again is still one
+/// entry: the world makes about 108,000 small title copies a frame, each a
+/// [`writing`] (run 14 here), and a list of ranges searched whole for every
+/// block checked grew with them for the 2 s each pin lasts. Wider ranges
+/// (rare) are kept whole.
+struct Pins {
+    blocks: BTreeMap<usize, std::time::Instant>,
+    wide: Vec<(usize, usize, std::time::Instant)>,
+    /// When ended pins were last dropped by [`Pins::push`].
+    pruned: Option<std::time::Instant>,
+}
+
+/// Ranges of more blocks than this are kept whole (4 MiB).
+const PIN_BLOCKS: usize = 64;
+
+impl Pins {
+    const fn new() -> Pins {
+        Pins { blocks: BTreeMap::new(), wide: Vec::new(), pruned: None }
+    }
+
+    fn push(&mut self, first: usize, last: usize, until: std::time::Instant) {
+        if last - first > PIN_BLOCKS {
+            self.wide.push((first, last, until));
+        } else {
+            for block in first..last {
+                let at = self.blocks.entry(block).or_insert(until);
+                *at = (*at).max(until);
+            }
+        }
+        // Ended pins also go here, at most every 100 ms: the check that
+        // drops them ([`guard`]) may not run for a while.
+        // `until` is now + PIN: no second reading of the clock per pin.
+        let now = until.checked_sub(PIN).unwrap_or(until);
+        if self.pruned.is_none_or(|p| now.duration_since(p) >= std::time::Duration::from_millis(100)) {
+            self.prune(now);
+        }
+    }
+
+    fn contains(&self, block: usize) -> bool {
+        self.blocks.contains_key(&block) || self.wide.iter().any(|&(from, to, _)| from <= block && block < to)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.blocks.is_empty() && self.wide.is_empty()
+    }
+
+    /// Drops the pins that ended by `now`.
+    fn prune(&mut self, now: std::time::Instant) {
+        self.blocks.retain(|_, until| *until > now);
+        self.wide.retain(|&(_, _, until)| until > now);
+        self.pruned = Some(now);
+    }
 }
 
 static GUARDS: Mutex<Guards> = Mutex::new(Guards {
@@ -485,7 +540,7 @@ static GUARDS: Mutex<Guards> = Mutex::new(Guards {
     clean: BlockSet::new(),
     holes: BlockSet::new(),
     aliased: BTreeSet::new(),
-    pins: Vec::new(),
+    pins: Pins::new(),
 });
 
 /// How long blocks stay writable after [`writing`].
@@ -494,7 +549,7 @@ const PIN: std::time::Duration = std::time::Duration::from_secs(2);
 impl Guards {
     /// Whether `block` is left writable for a kernel write.
     fn pinned(&self, block: usize) -> bool {
-        self.pins.iter().any(|&(from, to, _)| from <= block && block < to)
+        self.pins.contains(block)
     }
 }
 
@@ -722,8 +777,7 @@ fn guard(start: usize, end: usize) -> Option<Vec<usize>> {
     install();
     let mut g = guards();
     if !g.pins.is_empty() {
-        let now = std::time::Instant::now();
-        g.pins.retain(|&(_, _, until)| until > now);
+        g.pins.prune(std::time::Instant::now());
     }
     let mut written = Vec::new();
     let mut run: Option<usize> = None;
@@ -973,7 +1027,7 @@ pub fn writing(at: usize, len: usize) {
     let (first, last) = (at / BLOCK, (at + len).div_ceil(BLOCK));
     let mut g = guards();
     let until = std::time::Instant::now() + PIN;
-    g.pins.push((first, last, until));
+    g.pins.push(first, last, until);
     open(&mut g, at, at + len);
     if !view_guard() {
         return;
@@ -987,7 +1041,7 @@ pub fn writing(at: usize, len: usize) {
         }
         for alias in shown {
             if alias / BLOCK != block {
-                g.pins.push((alias / BLOCK, alias / BLOCK + 1, until));
+                g.pins.push(alias / BLOCK, alias / BLOCK + 1, until);
                 open_here(&mut g, alias, alias + BLOCK);
             }
         }
@@ -1163,6 +1217,32 @@ fn writable(at: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pins: a block pinned again is one entry, wide ranges are kept whole,
+    /// ended pins are dropped, and many small pins over the same blocks stay
+    /// few (the world's ~108,000 title copies a frame, run 14).
+    #[test]
+    fn pins_answer_per_block_and_stay_few() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        let mut pins = Pins::new();
+        assert!(pins.is_empty() && !pins.contains(5));
+        pins.push(5, 7, now + PIN);
+        assert!(pins.contains(5) && pins.contains(6) && !pins.contains(7) && !pins.contains(4));
+        pins.push(1000, 1000 + PIN_BLOCKS + 1, now + PIN);
+        assert!(pins.contains(1000) && pins.contains(1000 + PIN_BLOCKS) && !pins.contains(1001 + PIN_BLOCKS));
+        assert_eq!(pins.wide.len(), 1);
+        for k in 0..100_000usize {
+            pins.push(5 + k % 2, 6 + k % 2, now + PIN);
+        }
+        assert_eq!(pins.blocks.len(), 2, "one entry per block");
+        // A later pin of a block keeps the later end.
+        pins.push(5, 6, now + PIN + Duration::from_secs(5));
+        pins.prune(now + PIN + Duration::from_secs(1));
+        assert!(pins.contains(5) && !pins.contains(6) && !pins.contains(1000));
+        pins.prune(now + PIN + Duration::from_secs(6));
+        assert!(pins.is_empty());
+    }
 
     /// The bit set answers as a tree does, ranges across chunks included.
     #[test]
