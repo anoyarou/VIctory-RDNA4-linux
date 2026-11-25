@@ -51,8 +51,11 @@ pub(crate) enum C {
     FallbackUs,
     /// Copy pieces over pages noted unmapped (`host::holes`), zeroed unread.
     HoleSkips,
+    /// `ExecuteCommandLists` calls for the title's lists (one per list, or
+    /// one per submission with `VICTORY_MERGE_LISTS=1`).
+    HostSubmits,
 }
-const COUNTERS: usize = 29;
+const COUNTERS: usize = 30;
 static COUNT: [AtomicU64; COUNTERS] = [const { AtomicU64::new(0) }; COUNTERS];
 
 pub(crate) fn add(c: C, n: u64) {
@@ -144,13 +147,14 @@ pub(crate) fn log(frames: f64) {
     );
     tracing::info!(
         "copy steps per frame: {:.0} into title memory; flushes before them {:.2} ms, committed checks {:.2} ms, \
-         writing {:.2} ms, fallback reads {:.2} ms; {:.0} pieces over known holes",
+         writing {:.2} ms, fallback reads {:.2} ms; {:.0} pieces over known holes; {:.0} host submits",
         c[C::CopiesToTitle as usize],
         ms(c[C::FlushUs as usize]),
         ms(c[C::CommittedUs as usize]),
         ms(c[C::WritingUs as usize]),
         ms(c[C::FallbackUs as usize]),
         c[C::HoleSkips as usize],
+        c[C::HostSubmits as usize],
     );
     let ranges = RANGES.lock().unwrap_or_else(|e| e.into_inner()).take();
     let mut ranges: Vec<_> = ranges.into_iter().flatten().collect();

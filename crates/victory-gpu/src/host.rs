@@ -40,6 +40,8 @@ const RTV_RING: u32 = 1024;
 struct InFlight {
     fence: u64,
     submission: u64,
+    /// When it was handed to the host queue ([`merge_lists`]' safety net).
+    sent: std::time::Instant,
     _early_copies: Vec<(
         std::sync::Arc<crate::texture::Staging>,
         std::sync::Arc<crate::resource::HostTexture>,
@@ -771,6 +773,38 @@ pub(crate) fn dred_on() -> bool {
     })
 }
 
+/// Whether a submission's lists go to the host queue in one
+/// `ExecuteCommandLists` (`VICTORY_MERGE_LISTS=1`, off by default): each
+/// call is a queue submission of its own under vkd3d-proton (run 20 here:
+/// ~330 submit ioctls a frame on the queue thread, ~0.5 ms each, for ~136
+/// title submissions of ~2.3 lists). Lists were split because the host
+/// resets a device whose submission runs about 2 s, when a world frame took
+/// a second or more of GPU time; now a frame takes ~55 ms (run 21). As a
+/// safety net, lists are split again for 10 s after any submission took
+/// 250 ms or more from being sent until it was seen done (an upper bound
+/// of its GPU time).
+fn merge_lists() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_MERGE_LISTS").is_some_and(|v| v == "1"))
+        && SLOW_AT
+            .get()
+            .is_none_or(|t| t.lock().unwrap_or_else(|e| e.into_inner()).elapsed() >= MERGE_HOLD)
+}
+
+/// When a submission last took [`SLOW_SPAN`] or more (sent to seen done).
+static SLOW_AT: OnceLock<Mutex<std::time::Instant>> = OnceLock::new();
+const SLOW_SPAN: std::time::Duration = std::time::Duration::from_millis(250);
+const MERGE_HOLD: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Notes a submission's span from being sent to being seen done.
+fn note_gpu_span(span: std::time::Duration) {
+    if span >= SLOW_SPAN {
+        let now = std::time::Instant::now();
+        let slot = SLOW_AT.get_or_init(|| Mutex::new(now));
+        *slot.lock().unwrap_or_else(|e| e.into_inner()) = now;
+    }
+}
+
 /// Whether each list of a submission runs and is timed on its own, slow
 /// ones logged with their commands (`VICTORY_GPU_TIMING`, diagnostics
 /// builds; the commands are noted with `VICTORY_D3D12_DRED` on).
@@ -1146,6 +1180,7 @@ impl Host {
                 }
             };
             let Some(mut done) = done else { break };
+            note_gpu_span(done.sent.elapsed());
             last_sub = last_sub.max(done.submission);
             if let Some(Finish { lists, back }) = done.finish.take() {
                 {
@@ -1390,6 +1425,15 @@ impl Host {
             && !each
             && async_submit()
             && card_writes.is_empty();
+        // One `ExecuteCommandLists` for all of the submission's lists while
+        // the GPU's work is short ([`merge_lists`]).
+        let groups: Vec<&[Option<ID3D12CommandList>]> = if !each && groups.len() > 1 && merge_lists() {
+            vec![&lists[..]]
+        } else {
+            groups
+        };
+        #[cfg(feature = "diagnostics")]
+        crate::copystat::add(crate::copystat::C::HostSubmits, groups.len() as u64);
         if let Some(first) = first {
             // SAFETY: a closed list.
             unsafe { self.queue.ExecuteCommandLists(&[Some(first)]) };
@@ -1488,6 +1532,7 @@ impl Host {
                 .push_back(InFlight {
                     fence: *submitted,
                     submission: this_submission,
+                    sent: prepared,
                     _early_copies: early.copies,
                     _plans: batch.plans,
                     finish: Some(Finish {
@@ -1501,6 +1546,7 @@ impl Host {
         FINISHED.fetch_max(this_submission, Ordering::AcqRel);
         bury(this_submission);
         let gpu = prepared.elapsed();
+        note_gpu_span(gpu);
         SUBMISSION_US[0].fetch_add((prepared - started).as_micros() as u64, Ordering::Relaxed);
         SUBMISSION_US[1].fetch_add(gpu.as_micros() as u64, Ordering::Relaxed);
         #[cfg(feature = "diagnostics")]
