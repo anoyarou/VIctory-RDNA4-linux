@@ -127,6 +127,88 @@ fn on_wine() -> bool {
     *WINE
 }
 
+/// A title allocation as Wine reports it, in [`PAGE`] units.
+#[derive(Clone, Copy)]
+struct Region {
+    /// The allocation base, for dropping stale entries.
+    base: usize,
+    first: usize,
+    last: usize,
+    /// A file view (xmem's physical pages): not write-watched.
+    mapped: bool,
+    /// Small enough (4 GiB at most) to be asked about whole.
+    whole: bool,
+}
+
+/// Allocations seen by [`allocation`], by first page. Remaps (xmem's views)
+/// and failed askings drop entries.
+static REGIONS: Mutex<BTreeMap<usize, Region>> = Mutex::new(BTreeMap::new());
+
+fn forget_region(base: usize) {
+    REGIONS.lock().unwrap_or_else(|e| e.into_inner()).retain(|_, r| r.base != base);
+}
+
+/// The allocation holding `at`, cached (under Wine `VirtualQuery` takes the
+/// same lock the title's write faults do, one call per region walked). A
+/// walk is capped; an allocation known only in part is never asked about
+/// whole. After Slaktarn700/VIctory 27eefe4e.
+fn allocation(at: usize) -> Option<Region> {
+    use windows_sys::Win32::System::Memory::{MEM_MAPPED, MEMORY_BASIC_INFORMATION, VirtualQuery};
+    let page = at / PAGE;
+    if let Some((_, &r)) = REGIONS.lock().unwrap_or_else(|e| e.into_inner()).range(..=page).next_back()
+        && page < r.last
+    {
+        return Some(r);
+    }
+    let query = |p: usize| {
+        // SAFETY: plain data filled in by the query.
+        let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: a valid out pointer of the right size.
+        let n = unsafe { VirtualQuery(p as *const _, &mut info, size_of_val(&info)) };
+        (n != 0).then_some(info)
+    };
+    let info = query(at)?;
+    let base = info.AllocationBase as usize;
+    if base == 0 {
+        return None;
+    }
+    let mut end = base;
+    let mut done = false;
+    for _ in 0..256 {
+        let Some(i) = query(end) else {
+            done = true;
+            break;
+        };
+        if i.AllocationBase as usize != base {
+            done = true;
+            break;
+        }
+        end = i.BaseAddress as usize + i.RegionSize;
+    }
+    if !done {
+        // At least past `at`, so the next asking here is a cache hit.
+        end = end.max((at / PAGE + 1) * PAGE).max(at + (256 << 20));
+    }
+    if end <= at {
+        return None;
+    }
+    let r = Region {
+        base,
+        first: base.div_ceil(PAGE),
+        last: end / PAGE,
+        mapped: info.Type == MEM_MAPPED,
+        whole: done && end - base <= 4 << 30,
+    };
+    if r.first * PAGE > at || r.last <= r.first {
+        return None;
+    }
+    let mut regions = REGIONS.lock().unwrap_or_else(|e| e.into_inner());
+    // An allocation that replaced older ones in its range.
+    regions.retain(|_, o| o.last <= r.first || o.first >= r.last);
+    regions.insert(r.first, r);
+    Some(r)
+}
+
 /// A submission begins: memory asked about from now on is asked of the
 /// kernel again. Within one submission, a range the kernel already
 /// answered for is answered from the journal: Wine emulates write watching
@@ -159,31 +241,68 @@ pub(crate) fn writes(start: usize, end: usize, guarded: bool) -> Option<(u64, Ve
         j.asked += 1;
         return Some((j.asked, j.written.range(first..last).map(|(&p, &w)| (p, w)).collect()));
     }
-    let mut count = (last - first) * PAGE / KERNEL_PAGE;
-    j.found.resize(count.max(j.found.len()), 0);
-    let mut granularity = 0;
+    // Under Wine: view memory is not write-watched (straight to its
+    // guards), and watched memory is asked about a whole allocation at a
+    // time, so the other buffers in it are answered from the journal for
+    // the rest of the submission (see `new_submission`). After
+    // Slaktarn700/VIctory 27eefe4e.
+    let region = if on_wine() { allocation(start) } else { None };
+    let mapped = region.is_some_and(|r| r.mapped);
+    let (kfirst, klast) = match region {
+        Some(r) if !r.mapped && r.whole && r.first <= first && last <= r.last => (r.first, r.last),
+        _ => (first, last),
+    };
     #[cfg(feature = "diagnostics")]
     let started = std::time::Instant::now();
-    // SAFETY: the answer buffer holds `count` entries.
-    let failed = unsafe {
-        GetWriteWatch(
-            WRITE_WATCH_FLAG_RESET,
-            (first * PAGE) as *const _,
-            (last - first) * PAGE,
-            j.found.as_mut_ptr().cast(),
-            &mut count,
-            &mut granularity,
-        )
-    } != 0;
+    let ask = |kfirst: usize, klast: usize, found: &mut Vec<usize>| -> Option<usize> {
+        let mut count = (klast - kfirst) * PAGE / KERNEL_PAGE;
+        if found.len() < count {
+            found.resize(count, 0);
+        }
+        let mut granularity = 0;
+        // SAFETY: the answer buffer holds `count` entries.
+        let ok = unsafe {
+            GetWriteWatch(
+                WRITE_WATCH_FLAG_RESET,
+                (kfirst * PAGE) as *const _,
+                (klast - kfirst) * PAGE,
+                found.as_mut_ptr().cast(),
+                &mut count,
+                &mut granularity,
+            )
+        } == 0;
+        ok.then_some(count)
+    };
+    let mut asked = (kfirst, klast);
+    let mut answer = if mapped { None } else { ask(kfirst, klast, &mut j.found) };
+    if answer.is_none() && !mapped && (kfirst, klast) != (first, last) {
+        // The allocation was not one watched range after all (or is gone):
+        // just ours, and look it up again next time.
+        if let Some(r) = region {
+            forget_region(r.base);
+        }
+        asked = (first, last);
+        answer = ask(first, last, &mut j.found);
+    }
+    let failed = answer.is_none();
+    let mut count = answer.unwrap_or(0);
     let guarded = if failed {
         count = 0;
         if !guarded {
             return None;
         }
-        guard(first * PAGE, last * PAGE)?
+        match guard(first * PAGE, last * PAGE) {
+            Some(g) => g,
+            None => {
+                if let Some(r) = region {
+                    forget_region(r.base);
+                }
+                return None;
+            }
+        }
     } else {
         if on_wine() && j.asked_now.len() < 4096 {
-            j.asked_now.push((first, last));
+            j.asked_now.push(asked);
         }
         Vec::new()
     };
@@ -879,6 +998,7 @@ pub fn writing(at: usize, len: usize) {
 /// shows is new and read-write, so it is no longer guarded, and any placed
 /// textures backed by that range are evicted.
 pub fn title_memory_remapped(at: usize, len: usize) {
+    REGIONS.lock().unwrap_or_else(|e| e.into_inner()).clear();
     if len == 0 {
         return;
     }
@@ -1304,6 +1424,34 @@ mod tests {
         new_submission();
         let (now, next) = writes(p, p + 2 * PAGE, false).expect("watched");
         assert!(next.contains(&(p / PAGE, now)), "the write shows in the next submission");
+    }
+
+    /// Under Wine, asking about one buffer asks about its whole allocation:
+    /// another buffer in it is then answered from the journal within the
+    /// submission, and a write there shows in the next one (27eefe4e).
+    #[test]
+    fn a_whole_allocation_is_asked_about_once_per_submission() {
+        if !on_wine() {
+            return;
+        }
+        // SAFETY: a fresh write-watched allocation, kept (see above).
+        let p = unsafe {
+            VirtualAlloc(std::ptr::null(), 4 * PAGE, MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH, PAGE_READWRITE)
+        } as usize;
+        assert_ne!(p, 0);
+        new_submission();
+        let r = allocation(p).expect("an allocation");
+        assert!(r.whole && !r.mapped && r.first <= p / PAGE && p / PAGE + 4 <= r.last);
+        writes(p, p + PAGE, false).expect("watched");
+        // SAFETY: committed pages of ours.
+        unsafe { ((p + 3 * PAGE + 8) as *mut u8).write(1) };
+        let asked = JOURNAL.lock().unwrap().asked_now.clone();
+        assert!(asked.iter().any(|&(f, l)| f <= p / PAGE && p / PAGE + 4 <= l), "the whole allocation");
+        let (_, same) = writes(p + 3 * PAGE, p + 4 * PAGE, false).expect("watched");
+        assert!(!same.iter().any(|&(pg, _)| pg == p / PAGE + 3), "answered from the journal");
+        new_submission();
+        let (now, next) = writes(p + 3 * PAGE, p + 4 * PAGE, false).expect("watched");
+        assert!(next.contains(&(p / PAGE + 3, now)), "the write shows in the next submission");
     }
 
     /// A kernel read into a guarded view block fails; opened first, it
