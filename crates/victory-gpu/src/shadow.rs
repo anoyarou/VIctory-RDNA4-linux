@@ -2142,9 +2142,18 @@ impl Shadow {
 
 /// Merges bytes the GPU changed (`host != old`) into `title`, syncs `host` to
 /// `title`, and returns the tight `[first, last)` byte span where `title` was
-/// modified (or `None` if nothing changed). Scans 8 bytes at a time so
-/// unchanged 64-bit words skip per-byte branching.
+/// modified (or `None` if nothing changed). Uses AVX2 (32 bytes/iter) when
+/// available and skips writes on chunks where `host == old == title`.
 fn merge_gpu_writes(title: &mut [u8], host: &mut [u8], old: &[u8]) -> Option<(usize, usize)> {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: `is_x86_feature_detected!("avx2")` confirmed AVX2 support.
+        return unsafe { merge_gpu_writes_avx2(title, host, old) };
+    }
+    merge_gpu_writes_scalar(title, host, old)
+}
+
+fn merge_gpu_writes_scalar(title: &mut [u8], host: &mut [u8], old: &[u8]) -> Option<(usize, usize)> {
     let n = title.len().min(host.len()).min(old.len());
     let mut first = usize::MAX;
     let mut last = 0usize;
@@ -2153,7 +2162,10 @@ fn merge_gpu_writes(title: &mut [u8], host: &mut [u8], old: &[u8]) -> Option<(us
         let hw = u64::from_ne_bytes(host[i..i + 8].try_into().unwrap());
         let ow = u64::from_ne_bytes(old[i..i + 8].try_into().unwrap());
         if hw == ow {
-            host[i..i + 8].copy_from_slice(&title[i..i + 8]);
+            let tw = u64::from_ne_bytes(title[i..i + 8].try_into().unwrap());
+            if tw != hw {
+                host[i..i + 8].copy_from_slice(&title[i..i + 8]);
+            }
         } else {
             for k in i..i + 8 {
                 let h = host[k];
@@ -2179,8 +2191,80 @@ fn merge_gpu_writes(title: &mut [u8], host: &mut [u8], old: &[u8]) -> Option<(us
     (first < last).then_some((first, last))
 }
 
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn merge_gpu_writes_avx2(
+    title: &mut [u8],
+    host: &mut [u8],
+    old: &[u8],
+) -> Option<(usize, usize)> {
+    use std::arch::x86_64::*;
+
+    let n = title.len().min(host.len()).min(old.len());
+    let mut first = usize::MAX;
+    let mut last = 0usize;
+    let mut i = 0;
+    let tp = title.as_mut_ptr();
+    let hp = host.as_mut_ptr();
+    let op = old.as_ptr();
+
+    while i + 32 <= n {
+        // SAFETY: `i + 32 <= n` guarantees all three 32-byte unaligned accesses
+        // are within bounds of `title`, `host`, and `old`.
+        unsafe {
+            let v_h = _mm256_loadu_si256(hp.add(i).cast::<__m256i>());
+            let v_o = _mm256_loadu_si256(op.add(i).cast::<__m256i>());
+            let v_t = _mm256_loadu_si256(tp.add(i).cast::<__m256i>());
+            let gpu_eq = _mm256_cmpeq_epi8(v_h, v_o);
+            let t_eq_h = _mm256_cmpeq_epi8(v_t, v_h);
+            if _mm256_movemask_epi8(_mm256_and_si256(gpu_eq, t_eq_h)) == -1 {
+                i += 32;
+                continue;
+            }
+            if _mm256_movemask_epi8(gpu_eq) == -1 {
+                _mm256_storeu_si256(hp.add(i).cast::<__m256i>(), v_t);
+            } else {
+                let merged = _mm256_blendv_epi8(v_h, v_t, gpu_eq);
+                let t_diff = !(_mm256_movemask_epi8(_mm256_cmpeq_epi8(merged, v_t)) as u32);
+                if t_diff != 0 {
+                    _mm256_storeu_si256(tp.add(i).cast::<__m256i>(), merged);
+                    first = first.min(i + t_diff.trailing_zeros() as usize);
+                    last = i + (32 - t_diff.leading_zeros() as usize);
+                }
+                if _mm256_movemask_epi8(_mm256_cmpeq_epi8(merged, v_h)) != -1 {
+                    _mm256_storeu_si256(hp.add(i).cast::<__m256i>(), merged);
+                }
+            }
+        }
+        i += 32;
+    }
+    for k in i..n {
+        let h = host[k];
+        if h != old[k] && title[k] != h {
+            title[k] = h;
+            first = first.min(k);
+            last = k + 1;
+        }
+        host[k] = title[k];
+    }
+    (first < last).then_some((first, last))
+}
+
 /// Same as [`merge_gpu_writes`], also updating `old` to match `title`.
 fn merge_gpu_writes_mut(
+    title: &mut [u8],
+    host: &mut [u8],
+    old: &mut [u8],
+) -> Option<(usize, usize)> {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: `is_x86_feature_detected!("avx2")` confirmed AVX2 support.
+        return unsafe { merge_gpu_writes_mut_avx2(title, host, old) };
+    }
+    merge_gpu_writes_mut_scalar(title, host, old)
+}
+
+fn merge_gpu_writes_mut_scalar(
     title: &mut [u8],
     host: &mut [u8],
     old: &mut [u8],
@@ -2193,9 +2277,12 @@ fn merge_gpu_writes_mut(
         let hw = u64::from_ne_bytes(host[i..i + 8].try_into().unwrap());
         let ow = u64::from_ne_bytes(old[i..i + 8].try_into().unwrap());
         if hw == ow {
-            let tw = &title[i..i + 8];
-            host[i..i + 8].copy_from_slice(tw);
-            old[i..i + 8].copy_from_slice(tw);
+            let tw = u64::from_ne_bytes(title[i..i + 8].try_into().unwrap());
+            if tw != hw {
+                let ts = &title[i..i + 8];
+                host[i..i + 8].copy_from_slice(ts);
+                old[i..i + 8].copy_from_slice(ts);
+            }
         } else {
             for k in i..i + 8 {
                 let h = host[k];
@@ -2225,11 +2312,85 @@ fn merge_gpu_writes_mut(
     (first < last).then_some((first, last))
 }
 
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn merge_gpu_writes_mut_avx2(
+    title: &mut [u8],
+    host: &mut [u8],
+    old: &mut [u8],
+) -> Option<(usize, usize)> {
+    use std::arch::x86_64::*;
+
+    let n = title.len().min(host.len()).min(old.len());
+    let mut first = usize::MAX;
+    let mut last = 0usize;
+    let mut i = 0;
+    let tp = title.as_mut_ptr();
+    let hp = host.as_mut_ptr();
+    let op = old.as_mut_ptr();
+
+    while i + 32 <= n {
+        // SAFETY: `i + 32 <= n` guarantees all three 32-byte unaligned accesses
+        // are within bounds of `title`, `host`, and `old`.
+        unsafe {
+            let v_h = _mm256_loadu_si256(hp.add(i).cast::<__m256i>());
+            let v_o = _mm256_loadu_si256(op.add(i).cast::<__m256i>());
+            let v_t = _mm256_loadu_si256(tp.add(i).cast::<__m256i>());
+            let gpu_eq = _mm256_cmpeq_epi8(v_h, v_o);
+            let t_eq_h = _mm256_cmpeq_epi8(v_t, v_h);
+            if _mm256_movemask_epi8(_mm256_and_si256(gpu_eq, t_eq_h)) == -1 {
+                i += 32;
+                continue;
+            }
+            if _mm256_movemask_epi8(gpu_eq) == -1 {
+                _mm256_storeu_si256(hp.add(i).cast::<__m256i>(), v_t);
+                _mm256_storeu_si256(op.add(i).cast::<__m256i>(), v_t);
+            } else {
+                let merged = _mm256_blendv_epi8(v_h, v_t, gpu_eq);
+                let t_diff = !(_mm256_movemask_epi8(_mm256_cmpeq_epi8(merged, v_t)) as u32);
+                if t_diff != 0 {
+                    _mm256_storeu_si256(tp.add(i).cast::<__m256i>(), merged);
+                    first = first.min(i + t_diff.trailing_zeros() as usize);
+                    last = i + (32 - t_diff.leading_zeros() as usize);
+                }
+                _mm256_storeu_si256(hp.add(i).cast::<__m256i>(), merged);
+                _mm256_storeu_si256(op.add(i).cast::<__m256i>(), merged);
+            }
+        }
+        i += 32;
+    }
+    for k in i..n {
+        let h = host[k];
+        if h != old[k] && title[k] != h {
+            title[k] = h;
+            first = first.min(k);
+            last = k + 1;
+        }
+        let t = title[k];
+        host[k] = t;
+        old[k] = t;
+    }
+    (first < last).then_some((first, last))
+}
+
 /// Merges GPU-modified bytes (`gpu_new != staging_old`) into `title` and syncs
 /// `staging_old` to the merged bytes. Returns `(dirty_span_for_title, cpu_modified)`
 /// where `cpu_modified` is true if any byte unchanged by the GPU differed in `title`
 /// (a concurrent title CPU write that must be uploaded back to VRAM).
 fn merge_gpu_writes_card(
+    title: &mut [u8],
+    staging_old: &mut [u8],
+    gpu_new: &[u8],
+) -> (Option<(usize, usize)>, bool) {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: `is_x86_feature_detected!("avx2")` confirmed AVX2 support.
+        return unsafe { merge_gpu_writes_card_avx2(title, staging_old, gpu_new) };
+    }
+    merge_gpu_writes_card_scalar(title, staging_old, gpu_new)
+}
+
+fn merge_gpu_writes_card_scalar(
     title: &mut [u8],
     staging_old: &mut [u8],
     gpu_new: &[u8],
@@ -2266,6 +2427,69 @@ fn merge_gpu_writes_card(
             }
         }
         i += 8;
+    }
+    for k in i..n {
+        let g = gpu_new[k];
+        let o = staging_old[k];
+        if g != o {
+            if title[k] != g {
+                title[k] = g;
+                first = first.min(k);
+                last = k + 1;
+            }
+            staging_old[k] = g;
+        } else if title[k] != o {
+            staging_old[k] = title[k];
+            cpu_modified = true;
+        }
+    }
+    ((first < last).then_some((first, last)), cpu_modified)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn merge_gpu_writes_card_avx2(
+    title: &mut [u8],
+    staging_old: &mut [u8],
+    gpu_new: &[u8],
+) -> (Option<(usize, usize)>, bool) {
+    use std::arch::x86_64::*;
+
+    let n = title.len().min(staging_old.len()).min(gpu_new.len());
+    let mut first = usize::MAX;
+    let mut last = 0usize;
+    let mut cpu_modified = false;
+    let mut i = 0;
+    let tp = title.as_mut_ptr();
+    let op = staging_old.as_mut_ptr();
+    let gp = gpu_new.as_ptr();
+
+    while i + 32 <= n {
+        // SAFETY: `i + 32 <= n` guarantees all three 32-byte unaligned accesses
+        // are within bounds of `title`, `staging_old`, and `gpu_new`.
+        unsafe {
+            let v_g = _mm256_loadu_si256(gp.add(i).cast::<__m256i>());
+            let v_o = _mm256_loadu_si256(op.add(i).cast::<__m256i>());
+            let v_t = _mm256_loadu_si256(tp.add(i).cast::<__m256i>());
+            let gpu_eq = _mm256_cmpeq_epi8(v_g, v_o);
+            let t_eq_o = _mm256_cmpeq_epi8(v_t, v_o);
+            if _mm256_movemask_epi8(_mm256_and_si256(gpu_eq, t_eq_o)) == -1 {
+                i += 32;
+                continue;
+            }
+            if _mm256_movemask_epi8(_mm256_andnot_si256(t_eq_o, gpu_eq)) != 0 {
+                cpu_modified = true;
+            }
+            let merged = _mm256_blendv_epi8(v_g, v_t, gpu_eq);
+            let t_diff = !(_mm256_movemask_epi8(_mm256_cmpeq_epi8(merged, v_t)) as u32);
+            if t_diff != 0 {
+                _mm256_storeu_si256(tp.add(i).cast::<__m256i>(), merged);
+                first = first.min(i + t_diff.trailing_zeros() as usize);
+                last = i + (32 - t_diff.leading_zeros() as usize);
+            }
+            _mm256_storeu_si256(op.add(i).cast::<__m256i>(), merged);
+        }
+        i += 32;
     }
     for k in i..n {
         let g = gpu_new[k];
@@ -2673,5 +2897,67 @@ mod tests {
             cached[2],
             baseline[2].as_secs_f64() / cached[2].as_secs_f64(),
         );
+    }
+
+    #[test]
+    fn merge_gpu_writes_matches_scalar_across_lengths_and_patterns() {
+        let mut seed = 0x1234_5678_9abc_def0u64;
+        let mut next_u8 = || -> u8 {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 32) as u8
+        };
+
+        for len in [0, 1, 7, 8, 15, 31, 32, 33, 63, 64, 65, 127, 256, 4096] {
+            for pattern in 0..9 {
+                let old: Vec<u8> = (0..len).map(|_| next_u8()).collect();
+                let mut title = old.clone();
+                let mut host = old.clone();
+                for k in 0..len {
+                    let r = next_u8();
+                    if pattern == 1 || (pattern >= 3 && r < 15) {
+                        host[k] = host[k].wrapping_add(1);
+                    }
+                    if pattern == 2 || (pattern >= 4 && (r & 0xF0) == 0x20) {
+                        title[k] = title[k].wrapping_add(7);
+                    }
+                    if pattern == 5 && r < 10 {
+                        let v = old[k].wrapping_add(3);
+                        host[k] = v;
+                        title[k] = v;
+                    }
+                    if pattern == 8 && (r & 0x07) == 0 {
+                        // Overlapping conflict: GPU and CPU write different values to the same byte (GPU wins).
+                        host[k] = old[k].wrapping_add(11);
+                        title[k] = old[k].wrapping_add(29);
+                    }
+                }
+
+                let (mut t1, mut h1) = (title.clone(), host.clone());
+                let (mut t2, mut h2) = (title.clone(), host.clone());
+                assert_eq!(
+                    merge_gpu_writes_scalar(&mut t1, &mut h1, &old),
+                    merge_gpu_writes(&mut t2, &mut h2, &old),
+                );
+                assert_eq!((&t1, &h1), (&t2, &h2));
+
+                let (mut t1, mut h1, mut o1) = (title.clone(), host.clone(), old.clone());
+                let (mut t2, mut h2, mut o2) = (title.clone(), host.clone(), old.clone());
+                assert_eq!(
+                    merge_gpu_writes_mut_scalar(&mut t1, &mut h1, &mut o1),
+                    merge_gpu_writes_mut(&mut t2, &mut h2, &mut o2),
+                );
+                assert_eq!((&t1, &h1, &o1), (&t2, &h2, &o2));
+
+                let (mut t1, mut o1) = (title.clone(), old.clone());
+                let (mut t2, mut o2) = (title.clone(), old.clone());
+                assert_eq!(
+                    merge_gpu_writes_card_scalar(&mut t1, &mut o1, &host),
+                    merge_gpu_writes_card(&mut t2, &mut o2, &host),
+                );
+                assert_eq!((&t1, &o1), (&t2, &o2));
+            }
+        }
     }
 }
