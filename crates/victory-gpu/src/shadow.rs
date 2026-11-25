@@ -641,17 +641,43 @@ impl Shadow {
                             cb[4] += (t4 - t2).as_micros() as u64;
                         }
                         if let Some((dirty_start, dirty_end)) = merged {
-                            if mode != 1 {
-                                crate::watch::writing(
-                                    start + at + dirty_start,
-                                    dirty_end - dirty_start,
-                                );
+                            // View memory: the changed runs go in through a
+                            // view of ours, the title's guards untouched
+                            // (`watch::with_beside`), and are noted written.
+                            let span = (start + at + dirty_start, dirty_end - dirty_start);
+                            let runs: Vec<(usize, usize)> = changed_runs(
+                                &title_slice[..dirty_end],
+                                &read[..dirty_end],
+                                dirty_start,
+                            )
+                            .collect();
+                            let beside = mode == WATCHED_GUARDED
+                                && crate::watch::beside_on()
+                                && crate::watch::with_beside(span.0, span.1, |to| {
+                                    for &(off, len) in &runs {
+                                        crate::host::write_mapped(
+                                            to.wrapping_add(off - dirty_start),
+                                            title_slice[off..].as_ptr(),
+                                            len,
+                                        );
+                                    }
+                                })
+                                .is_some();
+                            if beside {
+                                crate::watch::landed(span.0, span.1);
+                                written += runs.iter().map(|&(_, len)| len).sum::<usize>();
+                                #[cfg(feature = "diagnostics")]
+                                crate::copystat::add(crate::copystat::C::CbBeside, 1);
+                            } else if mode != 1 {
+                                crate::watch::writing(span.0, span.1);
                             }
                             #[cfg(feature = "diagnostics")]
                             let t5 = std::time::Instant::now();
                             #[cfg(feature = "diagnostics")]
                             {
-                                cb[5] += (t5 - t4).as_micros() as u64;
+                                // Through a view of ours this is the write
+                                // itself; else the guards opened.
+                                cb[if beside { 6 } else { 5 }] += (t5 - t4).as_micros() as u64;
                             }
                             // Only the runs of bytes the GPU changed go back:
                             // the title's threads keep running, and a title
@@ -659,17 +685,15 @@ impl Shadow {
                             // the span, would be undone (Marvisak/VIctory#721;
                             // a lost hash-table insert is the likely cause of
                             // the title spinning at +0x50eb826, runs 8 and 9).
-                            for (off, len) in changed_runs(
-                                &title_slice[..dirty_end],
-                                &read[..dirty_end],
-                                dirty_start,
-                            ) {
-                                crate::host::write_mapped(
-                                    (start + at + off) as *mut u8,
-                                    title_slice[off..].as_ptr(),
-                                    len,
-                                );
-                                written += len;
+                            if !beside {
+                                for &(off, len) in &runs {
+                                    crate::host::write_mapped(
+                                        (start + at + off) as *mut u8,
+                                        title_slice[off..].as_ptr(),
+                                        len,
+                                    );
+                                    written += len;
+                                }
                             }
                             #[cfg(feature = "diagnostics")]
                             {

@@ -77,11 +77,13 @@ pub(crate) enum C {
     CbAfterUs,
     /// `finish_submission`: groups (host copies) copied back, their summed
     /// time and the wall time of the copy-backs.
+    /// Pieces written back through a view of ours (`watch::with_beside`).
+    CbBeside,
     CbGroups,
     CbGroupUs,
     CbWallUs,
 }
-const COUNTERS: usize = 46;
+const COUNTERS: usize = 47;
 
 /// The longest copy-back group since the last line, in microseconds.
 static CB_LONGEST: AtomicU64 = AtomicU64::new(0);
@@ -196,7 +198,7 @@ pub(crate) fn log(frames: f64) {
     );
     tracing::info!(
         "copy-back per frame: {:.2} ms wall over {:.0} groups (summed {:.2} ms, longest since the last line {:.2} ms); \
-         {:.1} MB declared, {:.0} pieces of which {:.0} differ; compare {:.2} ms, read {:.2} ms, merge {:.2} ms, \
+         {:.1} MB declared, {:.0} pieces of which {:.0} differ ({:.0} written beside); compare {:.2} ms, read {:.2} ms, merge {:.2} ms, \
          writing (guards opened) {:.2} ms, write back {:.2} ms, marking current {:.2} ms",
         ms(c[C::CbWallUs as usize]),
         c[C::CbGroups as usize],
@@ -205,6 +207,7 @@ pub(crate) fn log(frames: f64) {
         mb(c[C::CbDeclared as usize]),
         c[C::CbPieces as usize],
         c[C::CbDiffer as usize],
+        c[C::CbBeside as usize],
         ms(c[C::CbCompareUs as usize]),
         ms(c[C::CbReadUs as usize]),
         ms(c[C::CbMergeUs as usize]),

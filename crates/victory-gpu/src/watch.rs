@@ -694,6 +694,99 @@ fn aliases(at: usize) -> Vec<usize> {
     views.as_ref().map_or(Vec::new(), |v| v.shown(at - at % BLOCK).to_vec())
 }
 
+/// Views of ours, each of a whole physical-page section (section handle to
+/// its address and length), for writes into title memory that leave the
+/// title's own views and their guards as they are ([`with_beside`]).
+/// Writers hold the lock shared; a section that goes ([`title_section_closed`])
+/// is unmapped under it held alone.
+static BESIDE: std::sync::RwLock<Option<std::collections::HashMap<usize, (usize, usize)>>> =
+    std::sync::RwLock::new(None);
+
+/// Whether copy-back writes through views of ours ([`with_beside`]): on
+/// under Wine unless `VICTORY_BESIDE=0`, elsewhere only with `=1`.
+pub(crate) fn beside_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| match std::env::var("VICTORY_BESIDE").ok().as_deref() {
+        Some("0") => false,
+        Some("1") => true,
+        _ => on_wine(),
+    })
+}
+
+/// Runs `write` with the address, in a view of ours, of the title memory
+/// `[at, at + len)` when it lies in one view of physical pages the runtime
+/// told of ([`title_memory_view`]). The title's views stay as they are: no
+/// guard opened, no protection changed, no fault at the first write (runs
+/// 28-29 here: opening guards for copy-back, 229 ms a frame summed, and
+/// writing into the pages just opened, 206 ms; after
+/// avatarmanz/VIctory-7900XTX's `VICTORY_LAND_BESIDE`). The caller notes
+/// what it wrote ([`landed`]). `None`, and nothing run, if the memory is not
+/// such a view or no view of ours could be made.
+pub(crate) fn with_beside<R>(at: usize, len: usize, write: impl FnOnce(*mut u8) -> R) -> Option<R> {
+    use windows_sys::Win32::System::Memory::{FILE_MAP_WRITE, MEMORY_BASIC_INFORMATION, MapViewOfFile, VirtualQuery};
+    let (section, offset) = {
+        let views = VIEWS.lock().unwrap_or_else(|e| e.into_inner());
+        let views = views.as_ref()?;
+        let (&first, &(n, section, offset)) = views.by_addr.range(..=at).next_back()?;
+        if at + len > first + n {
+            return None;
+        }
+        (section, offset as usize + (at - first))
+    };
+    let inside = |&(base, size): &(usize, usize)| (offset + len <= size).then_some(base + offset);
+    {
+        let map = BESIDE.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = map.as_ref().and_then(|m| m.get(&section)) {
+            let to = inside(entry)?;
+            return Some(write(to as *mut u8));
+        }
+    }
+    {
+        let mut map = BESIDE.write().unwrap_or_else(|e| e.into_inner());
+        let map = map.get_or_insert_with(Default::default);
+        if !map.contains_key(&section) {
+            // SAFETY: the runtime's section handle, open while views of it
+            // are told of; the whole section, writable.
+            let view = unsafe { MapViewOfFile(section as _, FILE_MAP_WRITE, 0, 0, 0) }.Value as usize;
+            if view == 0 {
+                return None;
+            }
+            // SAFETY: plain data filled in by the query.
+            let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+            // SAFETY: a valid out pointer of the right size.
+            unsafe { VirtualQuery(view as *const _, &mut info, size_of_val(&info)) };
+            let size = info.RegionSize.max(1);
+            map.insert(section, (view, size));
+        }
+    }
+    let map = BESIDE.read().unwrap_or_else(|e| e.into_inner());
+    let to = inside(map.as_ref()?.get(&section)?)?;
+    Some(write(to as *mut u8))
+}
+
+/// Notes `[at, at + len)` of title memory written through a view of ours
+/// ([`with_beside`]), at every address the title shows those pages at.
+pub(crate) fn landed(at: usize, len: usize) {
+    title_memory_written(at, len);
+    let off = at % BLOCK;
+    for other in aliases(at) {
+        if other != at - off {
+            title_memory_written(other + off, len);
+        }
+    }
+}
+
+/// The runtime closed a physical-page section: a view of ours of it goes,
+/// so that a section given the same handle later is not taken for it.
+pub fn title_section_closed(section: usize) {
+    use windows_sys::Win32::System::Memory::{MEMORY_MAPPED_VIEW_ADDRESS, UnmapViewOfFile};
+    let mut map = BESIDE.write().unwrap_or_else(|e| e.into_inner());
+    if let Some((view, _)) = map.as_mut().and_then(|m| m.remove(&section)) {
+        // SAFETY: a view of ours; no writer holds the lock.
+        unsafe { UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: view as *mut _ }) };
+    }
+}
+
 /// The runtime mapped a view at `[at, at + len)` of the bytes from `offset`
 /// on of the physical-page section `section`. The view is writable, so the
 /// same pages guarded at another view are opened: their copies check them
@@ -1308,6 +1401,64 @@ mod tests {
             // SAFETY: our view.
             unsafe { UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: view as *mut _ }) };
         }
+    }
+
+    /// A write through a view of ours ([`with_beside`]) lands in the title's
+    /// pages at every view of them, leaves the guarded view read-only, and,
+    /// noted ([`landed`]), is reported written at both views. A closed
+    /// section's view of ours goes; asked again, one is made anew.
+    #[test]
+    fn a_write_beside_lands_without_opening_the_guard() {
+        use windows_sys::Win32::System::Memory::{
+            CreateFileMappingW, FILE_MAP_WRITE, MEMORY_BASIC_INFORMATION, MapViewOfFile, PAGE_READONLY, VirtualQuery,
+        };
+        // SAFETY: a pagefile section of two blocks, mapped read-write twice.
+        let (section, one, two) = unsafe {
+            let section = CreateFileMappingW(-1isize as _, std::ptr::null(), PAGE_READWRITE, 0, (2 * BLOCK) as u32, std::ptr::null());
+            assert!(!section.is_null());
+            let one = MapViewOfFile(section, FILE_MAP_WRITE, 0, 0, 2 * BLOCK).Value as usize;
+            let two = MapViewOfFile(section, FILE_MAP_WRITE, 0, 0, 2 * BLOCK).Value as usize;
+            assert!(one != 0 && two != 0);
+            title_memory_view(one, 2 * BLOCK, section as usize, 0);
+            title_memory_view(two, 2 * BLOCK, section as usize, 0);
+            (section as usize, one, two)
+        };
+        let (before, _) = writes_guarded(one, one + 2 * BLOCK).expect("view memory is guarded");
+        let at = one + BLOCK + 8;
+        let wrote = with_beside(at, 16, |to| {
+            // SAFETY: 16 bytes of our view of the section.
+            unsafe { to.write_bytes(0xab, 16) }
+        });
+        assert!(wrote.is_some(), "a view of ours of the section");
+        landed(at, 16);
+        // SAFETY: both views of the section, read.
+        unsafe {
+            assert_eq!(((one + BLOCK + 8) as *const u8).read_volatile(), 0xab);
+            assert_eq!(((two + BLOCK + 23) as *const u8).read_volatile(), 0xab);
+        }
+        // SAFETY: plain data filled in by the query.
+        let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: a valid out pointer of the right size.
+        unsafe { VirtualQuery((one + BLOCK) as *const _, &mut info, size_of_val(&info)) };
+        assert_eq!(info.Protect, PAGE_READONLY, "the guard stays");
+        let (_, after) = writes_guarded(one, one + 2 * BLOCK).expect("guarded");
+        assert!(after.iter().any(|&(p, w)| p == (one + BLOCK) / PAGE && w > before), "reported at the view written");
+        let (_, alias) = writes_guarded(two, two + 2 * BLOCK).expect("guarded");
+        assert!(alias.iter().any(|&(p, w)| p == (two + BLOCK) / PAGE && w > before), "and at the other view");
+        // Outside any view the runtime told of: nothing done.
+        let mut plain = vec![0u8; 64];
+        assert!(with_beside(plain.as_mut_ptr() as usize, 8, |_| ()).is_none());
+        // The section closed: our view goes; asked again, a new one is made.
+        title_section_closed(section);
+        assert!(BESIDE.read().unwrap().as_ref().is_none_or(|m| !m.contains_key(&section)));
+        assert!(with_beside(at, 1, |to| {
+            // SAFETY: a byte of our new view.
+            unsafe { to.read_volatile() }
+        }) == Some(0xab));
+        title_section_closed(section);
+        drop_views(&[one, two]);
+        // SAFETY: the section's handle, ours.
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(section as _) };
     }
 
     /// The title writes the pages of a guarded copy through another view of

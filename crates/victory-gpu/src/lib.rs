@@ -79,5 +79,6 @@ pub use memstat::report as memory_report;
 #[cfg(windows)]
 pub use watch::{
     title_memory_committed, title_memory_remapped, title_memory_view, title_memory_view_gone, title_memory_written,
+    title_section_closed,
     writing as kernel_will_write,
 };

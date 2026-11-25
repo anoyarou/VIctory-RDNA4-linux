@@ -365,6 +365,9 @@ unsafe impl Sync for Section {}
 impl Drop for Section {
     fn drop(&mut self) {
         SECTION_BYTES.fetch_sub(self.1, Ordering::Relaxed);
+        // The GPU side's own view of it goes first: a section given this
+        // handle later is another.
+        victory_gpu::title_section_closed(self.0 as usize);
         // SAFETY: our handle; views keep the section alive on their own.
         unsafe { CloseHandle(self.0) };
     }
