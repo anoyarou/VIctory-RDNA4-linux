@@ -585,6 +585,7 @@ impl Shadow {
             // overlapping ranges can skip it for the rest of the submission.
             let mode = self.watched.load(Ordering::Relaxed);
             let mut title: Option<Vec<u8>> = None;
+            let mut read: Option<Vec<u8>> = None;
             let mut synced = Vec::new();
             let mut at = from;
             while at < to {
@@ -601,21 +602,43 @@ impl Shadow {
                     });
                     let title_slice = &mut buf[..n];
                     if crate::host::read_into((start + at) as *const u8, title_slice) {
+                        // Title memory as read, to tell the GPU's bytes from
+                        // the title's after the merge.
+                        let read = read.get_or_insert_with(|| {
+                            let mut v = pooled(PAGE);
+                            v.resize(PAGE, 0);
+                            v
+                        });
+                        read[..n].copy_from_slice(title_slice);
                         // Title memory with the GPU's bytes put in; the copy
                         // takes the title's bytes in turn.
                         if let Some((dirty_start, dirty_end)) =
                             merge_gpu_writes(title_slice, host, old)
                         {
-                            let dirty_len = dirty_end - dirty_start;
                             if mode != 1 {
-                                crate::watch::writing(start + at + dirty_start, dirty_len);
+                                crate::watch::writing(
+                                    start + at + dirty_start,
+                                    dirty_end - dirty_start,
+                                );
                             }
-                            crate::host::write_mapped(
-                                (start + at + dirty_start) as *mut u8,
-                                title_slice[dirty_start..].as_ptr(),
-                                dirty_len,
-                            );
-                            written += dirty_len;
+                            // Only the runs of bytes the GPU changed go back:
+                            // the title's threads keep running, and a title
+                            // write between the read and this write, inside
+                            // the span, would be undone (Marvisak/VIctory#721;
+                            // a lost hash-table insert is the likely cause of
+                            // the title spinning at +0x50eb826, runs 8 and 9).
+                            for (off, len) in changed_runs(
+                                &title_slice[..dirty_end],
+                                &read[..dirty_end],
+                                dirty_start,
+                            ) {
+                                crate::host::write_mapped(
+                                    (start + at + off) as *mut u8,
+                                    title_slice[off..].as_ptr(),
+                                    len,
+                                );
+                                written += len;
+                            }
                         }
                         synced.push((start + at) / PAGE);
                     }
@@ -623,6 +646,9 @@ impl Shadow {
                 at += n;
             }
             if let Some(buf) = title {
+                give_back(buf);
+            }
+            if let Some(buf) = read {
                 give_back(buf);
             }
             // Pages made equal to title memory are current in the copy, so
@@ -2156,6 +2182,30 @@ impl Shadow {
 /// `title`, and returns the tight `[first, last)` byte span where `title` was
 /// modified (or `None` if nothing changed). Uses AVX2 (32 bytes/iter) when
 /// available and skips writes on chunks where `host == old == title`.
+/// The runs `(offset, len)` from `from` on where `merged` differs from
+/// `read`: the bytes the GPU changed, which alone go back to title memory.
+fn changed_runs<'a>(
+    merged: &'a [u8],
+    read: &'a [u8],
+    from: usize,
+) -> impl Iterator<Item = (usize, usize)> + 'a {
+    let n = merged.len().min(read.len());
+    let mut k = from;
+    std::iter::from_fn(move || {
+        while k < n && merged[k] == read[k] {
+            k += 1;
+        }
+        if k >= n {
+            return None;
+        }
+        let s = k;
+        while k < n && merged[k] != read[k] {
+            k += 1;
+        }
+        Some((s, k - s))
+    })
+}
+
 fn merge_gpu_writes(title: &mut [u8], host: &mut [u8], old: &[u8]) -> Option<(usize, usize)> {
     #[cfg(target_arch = "x86_64")]
     if std::arch::is_x86_feature_detected!("avx2") {
@@ -2766,6 +2816,26 @@ pub(crate) fn near(va: u64) -> String {
 mod tests {
     use super::*;
     use std::ops::Range;
+
+    /// Copy-back writes only the GPU's bytes: a title byte between two GPU
+    /// writes, changed after the read, is not written over (Marvisak/VIctory#721).
+    #[test]
+    fn copy_back_leaves_title_bytes_between_gpu_writes() {
+        let old = [0u8; 16];
+        let mut host = old;
+        host[2] = 7;
+        host[3] = 8;
+        host[10] = 9;
+        let mut title = old;
+        title[6] = 5; // the title's own write, before the read
+        let read = title;
+        let span = merge_gpu_writes(&mut title, &mut host, &old);
+        assert_eq!(span, Some((2, 11)));
+        let runs: Vec<_> = changed_runs(&title[..11], &read[..11], 2).collect();
+        assert_eq!(runs, vec![(2, 2), (10, 1)], "byte 6 is not in any run");
+        assert_eq!(title[6], 5);
+        assert_eq!(changed_runs(&read, &read, 0).count(), 0);
+    }
 
     #[test]
     fn sparse_copies_are_off_under_wine_unless_asked_for() {
