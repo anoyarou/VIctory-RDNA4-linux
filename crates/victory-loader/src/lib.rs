@@ -22,6 +22,8 @@
 //!    on, pass every thread start and end on to the attached images.
 
 #[cfg(windows)]
+mod code_patch;
+#[cfg(windows)]
 mod crash;
 pub mod prepare;
 pub mod resolve;
@@ -36,6 +38,8 @@ mod tls;
 #[cfg(windows)]
 mod windows;
 
+#[cfg(windows)]
+pub use code_patch::patch_code;
 #[cfg(windows)]
 pub use crash::{
     locate, log_crash, log_crashes_to, note_title_output, report_crashes, report_unhandled,
