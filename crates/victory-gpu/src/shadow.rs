@@ -2274,20 +2274,31 @@ impl Shadow {
     }
 }
 
-/// Merges bytes the GPU changed (`host != old`) into `title`, syncs `host` to
-/// `title`, and returns the tight `[first, last)` byte span where `title` was
-/// modified (or `None` if nothing changed). Uses AVX2 (32 bytes/iter) when
-/// available and skips writes on chunks where `host == old == title`.
 /// The runs `(offset, len)` from `from` on where `merged` differs from
 /// `read`: the bytes the GPU changed, which alone go back to title memory.
+/// Compared eight bytes at a time, bytes only inside a word that differs
+/// (run 19: 4.9% of `victory.exe`'s samples went to the byte loop).
 fn changed_runs<'a>(
     merged: &'a [u8],
     read: &'a [u8],
     from: usize,
 ) -> impl Iterator<Item = (usize, usize)> + 'a {
     let n = merged.len().min(read.len());
+    let word = |k: usize| {
+        (
+            u64::from_ne_bytes(merged[k..k + 8].try_into().unwrap()),
+            u64::from_ne_bytes(read[k..k + 8].try_into().unwrap()),
+        )
+    };
     let mut k = from;
     std::iter::from_fn(move || {
+        // Up to the first differing byte.
+        while k < n && !k.is_multiple_of(8) && merged[k] == read[k] {
+            k += 1;
+        }
+        while k + 8 <= n && { let (a, b) = word(k); a == b } {
+            k += 8;
+        }
         while k < n && merged[k] == read[k] {
             k += 1;
         }
@@ -2295,6 +2306,19 @@ fn changed_runs<'a>(
             return None;
         }
         let s = k;
+        // Up to the first equal byte.
+        while k < n && !k.is_multiple_of(8) && merged[k] != read[k] {
+            k += 1;
+        }
+        // Whole words whose every byte differs.
+        while k + 8 <= n && {
+            let (a, b) = word(k);
+            let x = a ^ b;
+            // No zero byte in the xor: every byte differs.
+            (x.wrapping_sub(0x0101_0101_0101_0101) & !x & 0x8080_8080_8080_8080) == 0
+        } {
+            k += 8;
+        }
         while k < n && merged[k] != read[k] {
             k += 1;
         }
@@ -2302,6 +2326,10 @@ fn changed_runs<'a>(
     })
 }
 
+/// Merges bytes the GPU changed (`host != old`) into `title`, syncs `host` to
+/// `title`, and returns the tight `[first, last)` byte span where `title` was
+/// modified (or `None` if nothing changed). Uses AVX2 (32 bytes/iter) when
+/// available and skips writes on chunks where `host == old == title`.
 fn merge_gpu_writes(title: &mut [u8], host: &mut [u8], old: &[u8]) -> Option<(usize, usize)> {
     #[cfg(target_arch = "x86_64")]
     if std::arch::is_x86_feature_detected!("avx2") {
@@ -2927,6 +2955,49 @@ pub(crate) fn near(va: u64) -> String {
 mod tests {
     use super::*;
     use std::ops::Range;
+
+    /// The word compare finds the same runs as a byte loop, any alignment,
+    /// sparse and dense changes alike.
+    #[test]
+    fn changed_runs_match_a_byte_loop() {
+        let naive = |m: &[u8], r: &[u8], from: usize| {
+            let mut out = Vec::new();
+            let mut k = from;
+            while k < m.len() {
+                if m[k] != r[k] {
+                    let s = k;
+                    while k < m.len() && m[k] != r[k] {
+                        k += 1;
+                    }
+                    out.push((s, k - s));
+                } else {
+                    k += 1;
+                }
+            }
+            out
+        };
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for case in 0..400 {
+            let n = (next() % 300) as usize + case % 9;
+            let read: Vec<u8> = (0..n).map(|_| next() as u8).collect();
+            let mut merged = read.clone();
+            let density = next() % 4;
+            for b in merged.iter_mut() {
+                if next() % 8 < density * 2 {
+                    *b = b.wrapping_add(1 + (next() % 255) as u8);
+                }
+            }
+            let from = if n == 0 { 0 } else { (next() as usize) % n };
+            let got: Vec<_> = changed_runs(&merged, &read, from).collect();
+            assert_eq!(got, naive(&merged, &read, from), "case {case}");
+        }
+    }
 
     /// Copy-back writes only the GPU's bytes: a title byte between two GPU
     /// writes, changed after the read, is not written over (Marvisak/VIctory#721).
