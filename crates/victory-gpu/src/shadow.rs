@@ -1102,6 +1102,20 @@ pub(crate) fn in_place(address: u64, end: u64) -> bool {
         .any(|(_, s)| s.start + s.len >= end)
 }
 
+/// Whether we run under Wine (its ntdll exports `wine_get_version`), as
+/// `victory-hle`'s `xmem::on_wine` tells.
+fn on_wine() -> bool {
+    static WINE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *WINE.get_or_init(|| {
+        use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
+        // SAFETY: plain lookups in ntdll, always loaded.
+        unsafe {
+            let ntdll = GetModuleHandleA(c"ntdll.dll".as_ptr().cast());
+            !ntdll.is_null() && GetProcAddress(ntdll, c"wine_get_version".as_ptr().cast()).is_some()
+        }
+    })
+}
+
 /// The window of title memory holding `[address, end)`, made on first use.
 /// `None` where the host GPU cannot use the memory in place: parts of it
 /// not committed, or of several allocations (views of physical pages).
@@ -1113,14 +1127,26 @@ fn direct(address: u64, end: u64) -> Option<Arc<Shadow>> {
         return None;
     }
     let device = DEVICE.get_or_init(|| {
-        // Diagnostics: copies, as without this.
-        let on = std::env::var_os("VICTORY_COPY_MEMORY").is_none();
+        // Under Wine the heaps are made without an error, but every frame
+        // then stays black from the first one, so title memory is copied
+        // there. `VICTORY_COPY_MEMORY` (diagnostics) copies it everywhere,
+        // as without this; under Wine, `VICTORY_COPY_MEMORY=0` keeps it in
+        // place, to try a host where that works.
+        let wine = on_wine();
+        let on = match std::env::var_os("VICTORY_COPY_MEMORY") {
+            None => !wine,
+            Some(v) => wine && v == "0",
+        };
         let device: Option<ID3D12Device13> = if on {
             host().and_then(|h| h.device.cast().ok())
         } else {
             None
         };
-        tracing::info!(on = device.is_some(), "title memory used in place by the host GPU");
+        tracing::info!(
+            on = device.is_some(),
+            wine,
+            "title memory used in place by the host GPU"
+        );
         device
     });
     let device = device.as_ref()?;
