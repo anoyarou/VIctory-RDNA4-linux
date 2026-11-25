@@ -216,6 +216,106 @@ struct Bindless {
     /// The frame (plus one) the plan's lists of everything were last made in,
     /// and whether slots changed since.
     full: (u64, bool),
+    /// Whether what the busy slots add to the plan's lists (reads, writes,
+    /// bounces, held resources) changed since those lists were made: slots
+    /// made again the same, the usual case, leave the lists as they are.
+    lists_changed: bool,
+    /// What the busy slots add to those lists, counted, kept as slots change.
+    lists: Lists,
+}
+
+/// A host copy's range: (the copy, address, bytes).
+type Span = (Arc<crate::shadow::Shadow>, usize, usize);
+
+/// Counted ranges by (copy, address, bytes): the range and how many slots add it.
+type Counted = BTreeMap<(usize, usize, usize), (Arc<crate::shadow::Shadow>, usize, usize, u32)>;
+
+/// What busy slots add to a plan's lists, each distinct entry once with the
+/// number of slots adding it, in the order the lists are made in.
+#[derive(Default)]
+struct Lists {
+    reads: Counted,
+    writes: Counted,
+    /// (title address, bounce slice, bytes) to slots.
+    bounces: BTreeMap<(u64, usize, u32), u32>,
+    /// Resources held for slots that read, by object.
+    retained: HashMap<usize, (ID3D12Resource, u32)>,
+}
+
+impl Lists {
+    fn count(map: &mut Counted, range: &Option<Span>, add: bool) {
+        let Some((s, a, l)) = range else { return };
+        let key = (Arc::as_ptr(s) as usize, *a, *l);
+        if add {
+            map.entry(key).or_insert_with(|| (s.clone(), *a, *l, 0)).3 += 1;
+        } else if let Some(e) = map.get_mut(&key) {
+            e.3 -= 1;
+            if e.3 == 0 {
+                map.remove(&key);
+            }
+        }
+    }
+
+    /// Busy slot use `u` adds to the lists, or (`add` false) no longer does.
+    fn change(&mut self, u: &SlotUse, add: bool) {
+        Self::count(&mut self.reads, &u.read, add);
+        Self::count(&mut self.writes, &u.write, add);
+        if let Some((slice, at, bytes)) = u.bounce {
+            let key = (at, slice, bytes);
+            if add {
+                *self.bounces.entry(key).or_insert(0) += 1;
+            } else if let Some(n) = self.bounces.get_mut(&key) {
+                *n -= 1;
+                if *n == 0 {
+                    self.bounces.remove(&key);
+                }
+            }
+        }
+        if u.read.is_some()
+            && let Some(r) = &u.retained
+        {
+            let key = windows::core::Interface::as_raw(r) as usize;
+            if add {
+                self.retained.entry(key).or_insert_with(|| (r.clone(), 0)).1 += 1;
+            } else if let Some(e) = self.retained.get_mut(&key) {
+                e.1 -= 1;
+                if e.1 == 0 {
+                    self.retained.remove(&key);
+                }
+            }
+        }
+    }
+
+    fn add(&mut self, u: &SlotUse) {
+        self.change(u, true);
+    }
+
+    fn remove(&mut self, u: &SlotUse) {
+        self.change(u, false);
+    }
+
+    /// Tests: the lists equal those made from every busy slot anew.
+    #[cfg(test)]
+    fn check<'a>(
+        &self,
+        busy: impl Iterator<Item = &'a SlotUse>,
+        reads: &[Span],
+        writes: &[Span],
+        bounces: &[(usize, u64, u32)],
+    ) {
+        let (mut r, mut w, mut bo) = (Vec::new(), Vec::new(), Vec::new());
+        for u in busy {
+            r.extend(u.read.clone());
+            w.extend(u.write.clone());
+            bo.extend(u.bounce);
+        }
+        let key = |v: &[Span]| v.iter().map(|(s, a, l)| (Arc::as_ptr(s) as usize, *a, *l)).collect::<Vec<_>>();
+        assert_eq!(key(reads), key(&merged(r, READ_GAP)), "counted reads");
+        assert_eq!(key(writes), key(&merged(w, 0)), "counted writes");
+        bo.sort_unstable_by_key(|b| (b.1, b.0, b.2));
+        bo.dedup();
+        assert_eq!(bounces, &bo[..], "counted bounces");
+    }
 }
 
 /// Time for making changed slots, at submission and at recording: an eighth
@@ -273,6 +373,26 @@ struct SlotUse {
     /// this of it.
     unmapped: bool,
     at: (u64, u64),
+}
+
+impl SlotUse {
+    /// Whether the plan's lists take the same from `self` as from `other`.
+    fn same_lists(&self, other: &SlotUse) -> bool {
+        fn same(
+            a: &Option<(Arc<crate::shadow::Shadow>, usize, usize)>,
+            b: &Option<(Arc<crate::shadow::Shadow>, usize, usize)>,
+        ) -> bool {
+            match (a, b) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Arc::ptr_eq(&a.0, &b.0) && a.1 == b.1 && a.2 == b.2,
+                _ => false,
+            }
+        }
+        same(&self.read, &other.read)
+            && same(&self.write, &other.write)
+            && self.bounce == other.bounce
+            && (self.read.is_none() || self.retained == other.retained)
+    }
 }
 
 /// Placed textures reached only through bindless slots are uploaded when a
@@ -1260,8 +1380,13 @@ impl HostHeap {
 
     /// Slot `index` (viewing `entry`) is no longer one for bindless access.
     fn drop_bindless(&self, b: &mut Bindless, index: u32, entry: Option<(u32, u32)>) {
-        b.uses.remove(&index);
-        b.busy.remove(&index);
+        let old = b.uses.remove(&index);
+        if b.busy.remove(&index) {
+            b.lists_changed = true;
+            if let Some(old) = &old {
+                b.lists.remove(old);
+            }
+        }
         b.unmapped_slots.remove(&index);
         b.direct_slots.remove(&index);
         b.recorded.remove(&index);
@@ -1873,7 +1998,8 @@ impl HostHeap {
         }
         self.budget_spend(0, started.elapsed().as_micros() as u64);
         plan_note(3, started, count, 0);
-        let mut b = self.bindless.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self.bindless.lock().unwrap_or_else(|e| e.into_inner());
+        let b = &mut *guard;
         let t_apply = std::time::Instant::now();
         let applied = results.len();
         // Whether a slot made reads, writes or keeps something else than
@@ -1938,8 +2064,13 @@ impl HostHeap {
             }
             match made {
                 None => {
-                    b.uses.remove(&index);
-                    b.busy.remove(&index);
+                    let old = b.uses.remove(&index);
+                    if b.busy.remove(&index) {
+                        b.lists_changed = true;
+                        if let Some(old) = &old {
+                            b.lists.remove(old);
+                        }
+                    }
                     b.unmapped_slots.remove(&index);
                     b.direct_slots.remove(&index);
                 }
@@ -1951,7 +2082,19 @@ impl HostHeap {
                         b.record_pending.insert(index);
                         self.record_hint.store(true, Ordering::Release);
                     }
-                    if u.read.is_some() || u.write.is_some() || u.bounce.is_some() {
+                    let busy = u.read.is_some() || u.write.is_some() || u.bounce.is_some();
+                    let was = b.busy.contains(&index);
+                    let old = b.uses.get(&index).filter(|_| was);
+                    if busy != was || busy && !old.is_some_and(|old| old.same_lists(&u)) {
+                        b.lists_changed = true;
+                        if let Some(old) = old {
+                            b.lists.remove(old);
+                        }
+                        if busy {
+                            b.lists.add(&u);
+                        }
+                    }
+                    if busy {
                         b.busy.insert(index);
                     } else {
                         b.busy.remove(&index);
@@ -1968,7 +2111,7 @@ impl HostHeap {
                     }
                     b.uses.insert(index, u);
                 }
-                Some((e, None)) => self.drop_bindless(&mut b, index, Some(e)),
+                Some((e, None)) => self.drop_bindless(b, index, Some(e)),
             }
         }
         plan_note(4, t_apply, applied, differing);
@@ -2006,21 +2149,40 @@ impl HostHeap {
         b.loose = false;
         b.extra.clear();
         let t_full = std::time::Instant::now();
-        let (mut reads, mut writes, mut bounces, mut retained) =
-            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        // The same lists as last time when no busy slot changed what it adds
+        // (they are made from those slots alone).
+        if !b.lists_changed && let Some(plan) = &b.plan {
+            let plan = Arc::new(BindlessPlan {
+                reads: plan.reads.clone(),
+                writes: plan.writes.clone(),
+                bounces: plan.bounces.clone(),
+                fresh,
+                fresh_reads,
+                copied_in: AtomicU64::new(0),
+                _retained: plan._retained.clone(),
+                _extra: Vec::new(),
+            });
+            b.plan = Some(plan.clone());
+            return Some(plan);
+        }
+        b.lists_changed = false;
+        // From the busy slots' counted contributions: each distinct entry
+        // once, already in order (going over every busy slot, two lookups
+        // each, was a tenth of the submitting thread's time while walking).
         // What slots view is held by the slots, and for some frames after
         // (`host::retire`).
-        for u in b.busy.iter().filter_map(|i| b.uses.get(i)) {
-            reads.extend(u.read.clone());
-            writes.extend(u.write.clone());
-            bounces.extend(u.bounce);
-            retained.extend(u.read.is_some().then(|| u.retained.clone()).flatten());
-        }
-        bounces.sort_unstable_by_key(|b| b.1);
+        let reads: Vec<Span> = b.lists.reads.values().map(|(s, a, l, _)| (s.clone(), *a, *l)).collect();
+        let writes: Vec<Span> = b.lists.writes.values().map(|(s, a, l, _)| (s.clone(), *a, *l)).collect();
+        let bounces: Vec<(usize, u64, u32)> =
+            b.lists.bounces.keys().map(|&(at, slice, bytes)| (slice, at, bytes)).collect();
+        let retained: Vec<ID3D12Resource> = b.lists.retained.values().map(|(r, _)| r.clone()).collect();
         let (n_busy, n_reads) = (b.busy.len(), reads.len());
+        let (reads, writes) = (merged(reads, READ_GAP), merged(writes, 0));
+        #[cfg(test)]
+        b.lists.check(b.busy.iter().filter_map(|i| b.uses.get(i)), &reads, &writes, &bounces);
         let plan = Arc::new(BindlessPlan {
-            reads: Arc::new(merged(reads, READ_GAP)),
-            writes: Arc::new(merged(writes, 0)),
+            reads: Arc::new(reads),
+            writes: Arc::new(writes),
             bounces: Arc::new(bounces),
             fresh,
             fresh_reads,
@@ -3722,6 +3884,20 @@ void main(uint3 id : SV_DispatchThreadID) {
             "only the written slot is made again"
         );
         assert_ne!(host_heap.made.lock().unwrap()[1], 0);
+
+        // Written again the same: the slot is made again, the lists kept.
+        cbv(mem.address() + 0x1000, 1);
+        let third = host_heap.bindless_plan().unwrap();
+        assert!(
+            Arc::ptr_eq(&second.reads, &third.reads),
+            "a slot made again the same keeps the lists"
+        );
+        // Pointed elsewhere: the lists are made again.
+        cbv(mem.address() + 0x2000, 1);
+        let fourth = host_heap.bindless_plan().unwrap();
+        assert!(!Arc::ptr_eq(&third.reads, &fourth.reads), "a changed slot remakes the lists");
+        assert_eq!(fourth.reads.len(), 1);
+        assert_eq!(fourth.reads[0].2, 0x2100);
 
         let release = |o: This| slot::<extern "system" fn(This) -> u32>(o, 0x10)(o);
         assert_eq!(release(title_heap), 0);

@@ -697,7 +697,7 @@ impl State {
                     let d = unsafe { t.GetDesc() };
                     tracing::info!(
                         kind = ?u.kind, slot = u.slot, offset = u.table_offset_dwords,
-                        format = d.Format.0, width = d.Width, height = d.Height,
+                        resource = format!("{r:#x}"), format = d.Format.0, width = d.Width, height = d.Height,
                         depth = d.DepthOrArraySize, flags = d.Flags.0,
                         "the light resolve reads"
                     );
@@ -710,6 +710,48 @@ impl State {
                 Some(View::Unordered(r, ..)) if r != 0 => crate::ambient::hold(list, r as This),
                 _ => false,
             };
+        }
+        // Diagnostics (`VICTORY_RESOLVE_CONSTANTS=1`): the constants the
+        // resolve reads, about once a second, to find what follows the
+        // scene's exposure.
+        #[cfg(feature = "diagnostics")]
+        if std::env::var_os("VICTORY_RESOLVE_CONSTANTS").is_some() {
+            static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+            let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+            if last.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(1)) {
+                *last = Some(std::time::Instant::now());
+                let frame = crate::queue::presented();
+                let floats = |at: u64, len: usize| {
+                    let mut bytes = vec![0u8; len.min(512)];
+                    if !crate::host::read_into(at as *const u8, &mut bytes) {
+                        return String::from("unreadable");
+                    }
+                    bytes
+                        .chunks_exact(4)
+                        .map(|w| format!("{:.6e}", f32::from_le_bytes([w[0], w[1], w[2], w[3]])))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                };
+                for (slot, root) in self.roots_ref(true).iter().enumerate() {
+                    match root {
+                        Root::View(at) => tracing::info!(frame, slot, at, "resolve root view: {}", floats(*at, 512)),
+                        Root::Constants(c) => {
+                            let text: Vec<String> =
+                                c.iter().map(|w| format!("{:.6e}", f32::from_bits(*w))).collect();
+                            tracing::info!(frame, slot, "resolve root constants: {}", text.join(" "));
+                        }
+                        _ => {}
+                    }
+                }
+                for u in stage.translated().used.iter().filter(|u| u.root == RootType::Table) {
+                    if let Some(View::Constant(at, size)) = view(u.kind, (u.slot, u.table_offset_dwords)) {
+                        tracing::info!(
+                            frame, slot = u.slot, offset = u.table_offset_dwords, at, size,
+                            "resolve table constants: {}", floats(at, size as usize)
+                        );
+                    }
+                }
+            }
         }
         let light = match view(ResourceType::Uav, crate::ambient::LIGHT) {
             Some(View::Unordered(r, ..)) => r,
@@ -774,6 +816,12 @@ impl State {
         }
         if !self.bind(list, p, false) {
             return false;
+        }
+        // The title's exposure is drawn to the first target of this program.
+        if p.stages.iter().any(|s| s.shader.calculates_exposure)
+            && let Some(&target) = self.targets.first()
+        {
+            crate::ambient::note_exposure(target as This);
         }
         if p.stages.iter().any(|s| s.shader.draws_sky)
             && let Some(&sky) = self.targets.first()

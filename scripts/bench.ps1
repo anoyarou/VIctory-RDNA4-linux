@@ -23,6 +23,9 @@ param(
     [switch]$GpuTiming,
     [switch]$Async,
     [int]$Shots = 3,
+    [int]$CinematicShotEvery = 0,
+    [switch]$DumpTargets,
+    [string[]]$ExtraEnv = @(),
     [string]$Exe = ''
 )
 
@@ -48,11 +51,14 @@ $env:VICTORY_HAIR = '1'
 $env:VICTORY_MEMORY_LOG_SECS = '10'
 $env:VICTORY_KEYS_FILE = $keys
 if ($Async) { $env:VICTORY_ASYNC_SUBMIT = '1' }
+if ($DumpTargets) { $env:VICTORY_DUMP_TARGETS = '1' } else { Remove-Item Env:VICTORY_DUMP_TARGETS -ErrorAction SilentlyContinue }
+foreach ($kv in $ExtraEnv) { $k, $v = $kv -split '=', 2; Set-Item "Env:$k" $v }
 # Screenshots: a `want` file in the folder saves the next frame.
 $shotsDir = Join-Path $out 'frames'
-if ($Shots -gt 0) { New-Item -ItemType Directory -Force $shotsDir | Out-Null; $env:VICTORY_CAPTURE = $shotsDir }
+if ($Shots -gt 0 -or $CinematicShotEvery -gt 0) { New-Item -ItemType Directory -Force $shotsDir | Out-Null; $env:VICTORY_CAPTURE = $shotsDir }
 $shotTimes = @(); if ($Shots -gt 0) { $shotTimes = 0..($Shots - 1) | ForEach-Object { [int](5 + $_ * ($MeasureSeconds - 10) / [Math]::Max(1, $Shots - 1)) } }
 $shotsTaken = 0
+$cinematicShots = 0
 Remove-Item Env:VICTORY_D3D12_DRED -ErrorAction SilentlyContinue
 # GPU timing per pipeline needs the commands noted, which DRED turns on.
 if ($GpuTiming) { $env:VICTORY_GPU_TIMING = '1'; $env:VICTORY_D3D12_DRED = '1' } else { $env:VICTORY_PROFILE = Join-Path $out 'cpu-profile.txt' }
@@ -115,6 +121,13 @@ try {
                 }
             }
             'cinematic' {
+                if ($CinematicShotEvery -gt 0) {
+                    $since = ((Get-Date) - $heavySince).TotalSeconds
+                    if ($since -ge ($cinematicShots + 1) * $CinematicShotEvery) {
+                        New-Item -ItemType File -Force (Join-Path $shotsDir 'want') | Out-Null
+                        $cinematicShots++
+                    }
+                }
                 if (((Get-Date) - $heavySince).TotalSeconds -ge $CinematicSeconds) {
                     $measureFrom = (Get-Date).ToUniversalTime(); $phase = 'measure'; Write-Status "measuring $MeasureSeconds s"
                 }
@@ -122,7 +135,8 @@ try {
             'measure' {
                 $elapsed = ((Get-Date).ToUniversalTime() - $measureFrom).TotalSeconds
                 if ($shotsTaken -lt $shotTimes.Count -and $elapsed -ge $shotTimes[$shotsTaken]) {
-                    New-Item -ItemType File -Force (Join-Path $shotsDir 'want') | Out-Null
+                    $name = if ($DumpTargets -and $shotsTaken -eq 0) { 'wantall' } else { 'want' }
+                    New-Item -ItemType File -Force (Join-Path $shotsDir $name) | Out-Null
                     $shotsTaken++
                 }
                 if (((Get-Date).ToUniversalTime() - $measureFrom).TotalSeconds -ge $MeasureSeconds) { $phase = 'done'; break }

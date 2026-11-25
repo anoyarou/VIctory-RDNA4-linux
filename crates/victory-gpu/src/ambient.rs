@@ -11,8 +11,15 @@
 //! -9.75). The title's own lighting then applies it with the surfaces'
 //! colors. Raised, not added: the result is the next frame's history.
 //!
-//! `VICTORY_AMBIENT=<level>` sets it (0.6 by default, 0 for none); `off`
-//! keeps the title's own output.
+//! `VICTORY_AMBIENT=<level>` sets it (0 for none); `off` keeps the title's
+//! own output. Unset, it follows the title's exposure: the images it goes
+//! into are pre-exposed, so a constant was the same in a dark scene (night,
+//! indoors: the title opens the exposure, -5.5 EV) as at noon (-9.75 EV),
+//! too much at night and too little in the day's shadows. The level is
+//! `at * 2^(-k * (EV - ev))` (`VICTORY_AMBIENT_EXPOSURE=k,ev,at`, by default
+//! 0.5, -9.75, 1.4: 1.4 at noon and about 0.3 at -5.5 EV, the levels that
+//! looked right there by hand), the EV read on the GPU from what
+//! `PS_CalculateExposure` drew (a 1x1 RGBA32F: multiplier, EV, EV).
 //! shortcut: the same light everywhere, from everywhere; gone once rays run.
 
 use std::sync::OnceLock;
@@ -28,6 +35,43 @@ use crate::object::This;
 
 /// The programs it follows, by the start of their name.
 pub(crate) const PROGRAM: &[u8] = b"CS_ScreenProbes_TemporalResolve";
+
+/// The program that draws the title's exposure, by the start of its name.
+pub(crate) const EXPOSURE: &[u8] = b"PS_CalculateExposure";
+
+/// The texture [`EXPOSURE`] last drew to (a title object; 0 for none).
+static EXPOSURE_TARGET: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// [`EXPOSURE`] draws to `target`.
+pub(crate) fn note_exposure(target: This) {
+    // The title draws it to two textures in turn (this frame's, the last).
+    let before = EXPOSURE_TARGET.swap(target as usize, Ordering::Relaxed);
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    if before == 0 {
+        ONCE.call_once(|| tracing::info!("the ambient light follows the title's exposure"));
+    }
+}
+
+/// Whether the level follows the exposure: `VICTORY_AMBIENT` unset.
+fn follows_exposure() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_AMBIENT").is_none())
+}
+
+/// `k`, the EV and the level there (`VICTORY_AMBIENT_EXPOSURE=k,ev,at`).
+fn exposure_curve() -> [f32; 3] {
+    static SET: OnceLock<[f32; 3]> = OnceLock::new();
+    *SET.get_or_init(|| {
+        let mut curve = [0.5, -9.75, 1.4];
+        let set = std::env::var("VICTORY_AMBIENT_EXPOSURE").unwrap_or_default();
+        for (to, v) in curve.iter_mut().zip(set.split(',')) {
+            if let Ok(v) = v.trim().parse() {
+                *to = v;
+            }
+        }
+        curve
+    })
+}
 /// Where they write the indirect diffuse light (R9G9B9E5 as 32-bit
 /// integers): root parameter and place in its table.
 pub(crate) const LIGHT: (u8, u32) = (1, 176);
@@ -246,17 +290,29 @@ fn live_level() -> Option<f32> {
 }
 
 const SOURCE: &str = r#"
-#define RS "RootConstants(num32BitConstants=12, b0), DescriptorTable(UAV(u0), SRV(t0), SRV(t1))"
+#define RS "RootConstants(num32BitConstants=16, b0), DescriptorTable(UAV(u0), SRV(t0), SRV(t1), SRV(t2))"
 cbuffer Floor : register(b0) {
     float level; float3 tint;
     float strength; float radius; float near; float tan_y;
     float gain; float least;
     float held; float floor_part;
+    // Following the exposure (`k` 0: not): at_ev * 2^(-k (EV - ev)).
+    float k; float ev; float at_ev; float has_exposure;
 };
 Texture2D<float3> sky : register(t1);
+Texture2D<float4> exposure : register(t2);
+// The level, from the title's exposure when it follows it.
+float exposed_level() {
+    if (has_exposure > 0.0 && k != 0.0) {
+        float e = exposure.Load(int3(0, 0, 0)).y;
+        // A plausible EV only; else the constant.
+        if (e > -20.0 && e < 10.0) return clamp(at_ev * exp2(-k * (e - ev)), 0.01, 4.0);
+    }
+    return level;
+}
 // The light, from the sky's mean when it follows the sky (gain above 0).
 float3 from_around() {
-    if (gain <= 0.0) return tint * level;
+    if (gain <= 0.0) return tint * exposed_level();
     uint sw, sh;
     sky.GetDimensions(sw, sh);
     float3 sum = 0.0;
@@ -399,7 +455,7 @@ fn make(device: &ID3D12Device) -> windows::core::Result<Pass> {
         let kind = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
         let views = device.CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
             Type: kind,
-            NumDescriptors: SLOTS * 3,
+            NumDescriptors: SLOTS * 4,
             Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
             NodeMask: 0,
         })?;
@@ -470,7 +526,7 @@ fn record(list: &HostList, light: This, depth: Option<This>, held: f32) -> bool 
     ONCE.call_once(|| {
         tracing::info!(level, width = d.Width, height = d.Height, "ambient light");
     });
-    let slot = pass.next.fetch_add(1, Ordering::Relaxed) % SLOTS * 3;
+    let slot = pass.next.fetch_add(1, Ordering::Relaxed) % SLOTS * 4;
     // The sky image, if the light follows it and the title has drawn it.
     let sky_image = SKY_IMAGE.load(Ordering::Relaxed) as This;
     let sky = follow().and_then(|f| {
@@ -499,6 +555,21 @@ fn record(list: &HostList, light: This, depth: Option<This>, held: f32) -> bool 
     });
     if let Some(depth) = depth {
         list.keep(depth);
+    }
+    // The title's exposure, read as a shader resource; of the expected kind.
+    let exposed = EXPOSURE_TARGET.load(Ordering::Relaxed) as This;
+    let exposure = (follows_exposure() && live_level().is_none() && !exposed.is_null())
+        .then(|| crate::resource::host_resource(exposed))
+        .flatten()
+        .filter(|t| {
+            // SAFETY: a live resource.
+            let t = unsafe { t.GetDesc() };
+            t.Format == DXGI_FORMAT_R32G32B32A32_FLOAT && (t.Width, t.Height) == (1, 1)
+        });
+    if let Some(exposure) = exposure {
+        list.keep(exposure);
+        const SHADER_RESOURCE: u32 = 0x40 | 0x80;
+        crate::list::ensure_state(list, exposed, SHADER_RESOURCE);
     }
     let l = &list.list;
     uav_barrier(l);
@@ -538,6 +609,16 @@ fn record(list: &HostList, light: This, depth: Option<This>, held: f32) -> bool 
         };
         let third = D3D12_CPU_DESCRIPTOR_HANDLE { ptr: at.ptr + 2 * pass.step as usize };
         host.device.CreateShaderResourceView(sky.map(|(t, _)| t), Some(&around), third);
+        let read = D3D12_SHADER_RESOURCE_VIEW_DESC {
+            Format: DXGI_FORMAT_R32G32B32A32_FLOAT,
+            ViewDimension: D3D12_SRV_DIMENSION_TEXTURE2D,
+            Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+            Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                Texture2D: D3D12_TEX2D_SRV { MipLevels: 1, ..Default::default() },
+            },
+        };
+        let fourth = D3D12_CPU_DESCRIPTOR_HANDLE { ptr: at.ptr + 3 * pass.step as usize };
+        host.device.CreateShaderResourceView(exposure, Some(&read), fourth);
         l.SetDescriptorHeaps(&[Some(pass.views.clone())]);
         l.SetComputeRootSignature(&pass.root);
         l.SetPipelineState(&pass.pso);
@@ -547,8 +628,12 @@ fn record(list: &HostList, light: This, depth: Option<This>, held: f32) -> bool 
         let strength = if depth.is_some() { strength } else { 0.0 };
         let [gain, least] = sky.map_or([0.0, 0.0], |(_, f)| f);
         let floor = *LEAST.lock().unwrap_or_else(|e| e.into_inner());
-        let constants = [level, r, g, b, strength, radius, near, tan_y, gain, least, held, floor];
-        l.SetComputeRoot32BitConstants(0, 12, constants.as_ptr().cast(), 0);
+        let [k, ev, at_ev] = exposure_curve();
+        let has = if exposure.is_some() { 1.0 } else { 0.0 };
+        let constants = [
+            level, r, g, b, strength, radius, near, tan_y, gain, least, held, floor, k, ev, at_ev, has,
+        ];
+        l.SetComputeRoot32BitConstants(0, 16, constants.as_ptr().cast(), 0);
         l.SetComputeRootDescriptorTable(
             1,
             D3D12_GPU_DESCRIPTOR_HANDLE {
