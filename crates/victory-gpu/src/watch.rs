@@ -200,14 +200,115 @@ pub(crate) fn writes_guarded(start: usize, end: usize) -> Option<(u64, Vec<(usiz
 /// Guarded blocks of view memory.
 const BLOCK: usize = PAGE;
 
+/// Block numbers as bits, in chunks of 4096 blocks (256 MiB of address
+/// space). The guards' checks look at every block of a range under the
+/// guards' lock, which every copy's check waits for: a bit is several times
+/// quicker to look at than a tree's node.
+struct BlockSet {
+    chunks: std::collections::HashMap<usize, Box<[u64; 64]>, std::hash::BuildHasherDefault<ChunkHash>>,
+}
+
+/// Chunk numbers are spread enough by a multiplication.
+#[derive(Default)]
+struct ChunkHash(u64);
+
+impl std::hash::Hasher for ChunkHash {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0 ^ u64::from(b)).wrapping_mul(0x100_0000_01b3);
+        }
+    }
+    fn write_usize(&mut self, n: usize) {
+        self.0 = (n as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+}
+
+impl BlockSet {
+    const SHIFT: usize = 12;
+
+    const fn new() -> Self {
+        Self { chunks: std::collections::HashMap::with_hasher(std::hash::BuildHasherDefault::new()) }
+    }
+
+    fn at(block: usize) -> (usize, usize, u64) {
+        let bit = block & ((1 << Self::SHIFT) - 1);
+        (block >> Self::SHIFT, bit / 64, 1u64 << (bit % 64))
+    }
+
+    fn contains(&self, block: &usize) -> bool {
+        let (chunk, word, bit) = Self::at(*block);
+        self.chunks.get(&chunk).is_some_and(|c| c[word] & bit != 0)
+    }
+
+    /// Whether it was not in the set.
+    fn insert(&mut self, block: usize) -> bool {
+        let (chunk, word, bit) = Self::at(block);
+        let c = self.chunks.entry(chunk).or_insert_with(|| Box::new([0; 64]));
+        let new = c[word] & bit == 0;
+        c[word] |= bit;
+        new
+    }
+
+    /// Whether it was in the set.
+    fn remove(&mut self, block: &usize) -> bool {
+        let (chunk, word, bit) = Self::at(*block);
+        let Some(c) = self.chunks.get_mut(&chunk) else { return false };
+        let had = c[word] & bit != 0;
+        c[word] &= !bit;
+        had
+    }
+
+    /// The blocks of `range` in the set, in order.
+    fn range(&self, range: std::ops::Range<usize>) -> std::vec::IntoIter<usize> {
+        let mut found = Vec::new();
+        if range.start < range.end {
+            let (first, last) = (range.start >> Self::SHIFT, (range.end - 1) >> Self::SHIFT);
+            let mut chunks: Vec<usize> = if last - first < self.chunks.len() {
+                (first..=last).filter(|c| self.chunks.contains_key(c)).collect()
+            } else {
+                let mut all: Vec<usize> =
+                    self.chunks.keys().copied().filter(|c| (first..=last).contains(c)).collect();
+                all.sort_unstable();
+                all
+            };
+            chunks.dedup();
+            for chunk in chunks {
+                let bits = &self.chunks[&chunk];
+                for (w, &word) in bits.iter().enumerate() {
+                    let mut word = word;
+                    while word != 0 {
+                        let block = (chunk << Self::SHIFT) + w * 64 + word.trailing_zeros() as usize;
+                        word &= word - 1;
+                        if range.contains(&block) {
+                            found.push(block);
+                        }
+                    }
+                }
+            }
+        }
+        found.into_iter()
+    }
+}
+
+impl Extend<usize> for BlockSet {
+    fn extend<I: IntoIterator<Item = usize>>(&mut self, blocks: I) {
+        for block in blocks {
+            self.insert(block);
+        }
+    }
+}
+
 struct Guards {
     /// Blocks we made read-only.
-    protected: BTreeSet<usize>,
+    protected: BlockSet,
     /// Of those, the ones not written since a copy took them.
-    clean: BTreeSet<usize>,
+    clean: BlockSet,
     /// Unmapped blocks (`VirtualProtect` failed) within guarded ranges;
     /// cleared by [`title_memory_remapped`] when the runtime maps them.
-    holes: BTreeSet<usize>,
+    holes: BlockSet,
     /// Blocks whose page was guarded together with its other views (those
     /// views' blocks are in it too): a write to one opens them all.
     aliased: BTreeSet<usize>,
@@ -220,9 +321,9 @@ struct Guards {
 }
 
 static GUARDS: Mutex<Guards> = Mutex::new(Guards {
-    protected: BTreeSet::new(),
-    clean: BTreeSet::new(),
-    holes: BTreeSet::new(),
+    protected: BlockSet::new(),
+    clean: BlockSet::new(),
+    holes: BlockSet::new(),
     aliased: BTreeSet::new(),
     pins: Vec::new(),
 });
@@ -590,7 +691,6 @@ fn open_here(g: &mut Guards, start: usize, end: usize) -> bool {
     let blocks: Vec<usize> = g
         .protected
         .range(start / BLOCK..end.div_ceil(BLOCK))
-        .copied()
         .collect();
     if blocks.is_empty() {
         return false;
@@ -678,12 +778,10 @@ pub fn title_memory_remapped(at: usize, len: usize) {
         let blocks: Vec<usize> = g
             .protected
             .range(at / BLOCK..end.div_ceil(BLOCK))
-            .copied()
             .collect();
         let holes: Vec<usize> = g
             .holes
             .range(at / BLOCK..end.div_ceil(BLOCK))
-            .copied()
             .collect();
         let changed = !holes.is_empty() || !blocks.is_empty();
         for block in holes {
@@ -835,6 +933,31 @@ fn writable(at: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bit set answers as a tree does, ranges across chunks included.
+    #[test]
+    fn block_set_matches_a_tree() {
+        let mut set = BlockSet::new();
+        let mut tree = BTreeSet::new();
+        let mut x = 12345u64;
+        for _ in 0..20_000 {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let block = ((x >> 33) % 30_000) as usize + if x & 1 == 0 { 0 } else { 1 << 30 };
+            if x & 6 == 0 {
+                assert_eq!(set.remove(&block), tree.remove(&block));
+            } else {
+                assert_eq!(set.insert(block), tree.insert(block));
+            }
+            assert_eq!(set.contains(&block), tree.contains(&block));
+        }
+        set.extend(5000..9000);
+        tree.extend(5000..9000);
+        for r in [0..30_000, 4095..4097, 8191..12_289, (1 << 30)..(1 << 30) + 30_000, 0..usize::MAX / 2] {
+            let ours: Vec<usize> = set.range(r.clone()).collect();
+            let theirs: Vec<usize> = tree.range(r).copied().collect();
+            assert_eq!(ours, theirs);
+        }
+    }
     use windows_sys::Win32::System::Memory::{
         MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc, VirtualFree,
     };

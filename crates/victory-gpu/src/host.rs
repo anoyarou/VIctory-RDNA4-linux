@@ -2989,12 +2989,135 @@ pub(crate) fn in_parallel<T: Sync>(list: &[T], least: usize, f: impl Fn(&[T]) + 
         }
     };
     let threads = THREADS.min(list.len().div_ceil(piece));
+    // Workers kept for the run: starting and joining threads at every call
+    // was an eighth of the submitting thread's time. Taken by one caller at a
+    // time; another caller meanwhile (or one inside a piece) starts its own.
+    if let Some(pool) = Pool::get()
+        && let Ok(_turn) = pool.turn.try_lock()
+    {
+        return pool.run(&work);
+    }
     std::thread::scope(|s| {
         for _ in 1..threads {
             s.spawn(work);
         }
         work();
     });
+}
+
+/// A job lent to the workers: valid until `Pool::run` has seen every worker
+/// done with it.
+#[derive(Clone, Copy)]
+struct Job(*const (dyn Fn() + Sync + 'static));
+// SAFETY: the closure behind it is `Sync`, and `run` keeps it alive until no
+// worker holds it.
+unsafe impl Send for Job {}
+
+struct PoolState {
+    job: Option<Job>,
+    round: u64,
+    running: usize,
+    panicked: bool,
+}
+
+/// The helpers of `in_parallel`.
+struct Pool {
+    turn: Mutex<()>,
+    state: Mutex<PoolState>,
+    start: std::sync::Condvar,
+    done: std::sync::Condvar,
+}
+
+impl Pool {
+    const WORKERS: usize = 5;
+
+    fn get() -> Option<&'static Pool> {
+        static POOL: OnceLock<Option<&'static Pool>> = OnceLock::new();
+        *POOL.get_or_init(|| {
+            let pool: &'static Pool = Box::leak(Box::new(Pool {
+                turn: Mutex::new(()),
+                state: Mutex::new(PoolState { job: None, round: 0, running: 0, panicked: false }),
+                start: std::sync::Condvar::new(),
+                done: std::sync::Condvar::new(),
+            }));
+            for i in 0..Self::WORKERS {
+                let spawned = std::thread::Builder::new()
+                    .name(format!("victory-parallel-{i}"))
+                    .spawn(move || pool.work());
+                if spawned.is_err() {
+                    return None;
+                }
+            }
+            Some(pool)
+        })
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, PoolState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn work(&self) {
+        let mut seen = 0u64;
+        loop {
+            let job = {
+                let mut state = self.lock();
+                while state.round == seen {
+                    state = self.start.wait(state).unwrap_or_else(|e| e.into_inner());
+                }
+                seen = state.round;
+                state.job
+            };
+            let ok = job.is_none_or(|job| {
+                // SAFETY: `run` waits for this worker before the job's
+                // closure goes out of scope.
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { (*job.0)() }))
+                    .is_ok()
+            });
+            let mut state = self.lock();
+            state.panicked |= !ok;
+            state.running -= 1;
+            if state.running == 0 {
+                self.done.notify_all();
+            }
+        }
+    }
+
+    /// Runs `work` here and on every worker; returns once all are done.
+    fn run(&self, work: &(dyn Fn() + Sync)) {
+        // SAFETY: only the lifetime is changed; the job is cleared and every
+        // worker done with it before this returns or unwinds (see `Wait`).
+        let job = Job(unsafe {
+            std::mem::transmute::<*const (dyn Fn() + Sync + '_), *const (dyn Fn() + Sync + 'static)>(
+                work,
+            )
+        });
+        {
+            let mut state = self.lock();
+            state.job = Some(job);
+            state.running = Self::WORKERS;
+            state.panicked = false;
+            state.round += 1;
+        }
+        self.start.notify_all();
+
+        /// Waits for the workers, also when `work` panics here.
+        struct Wait<'a>(&'a Pool);
+        impl Drop for Wait<'_> {
+            fn drop(&mut self) {
+                let mut state = self.0.lock();
+                while state.running > 0 {
+                    state = self.0.done.wait(state).unwrap_or_else(|e| e.into_inner());
+                }
+                state.job = None;
+            }
+        }
+        let wait = Wait(self);
+        work();
+        drop(wait);
+        if self.lock().panicked {
+            panic!("a piece of parallel work panicked");
+        }
+    }
 }
 
 /// Brings `[from, from + len)` of a host copy up to date now.
@@ -4211,6 +4334,56 @@ fn pump() {
             let _ = TranslateMessage(&message);
             DispatchMessageW(&message);
         }
+    }
+}
+
+#[cfg(test)]
+mod parallel {
+    use super::in_parallel;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn sum(list: &[u64]) -> u64 {
+        let total = AtomicU64::new(0);
+        in_parallel(list, 8, |piece| {
+            total.fetch_add(piece.iter().sum::<u64>(), Ordering::Relaxed);
+        });
+        total.into_inner()
+    }
+
+    #[test]
+    fn every_item_is_done_once_over_many_calls() {
+        let list: Vec<u64> = (1..=10_000).collect();
+        for _ in 0..200 {
+            assert_eq!(sum(&list), 50_005_000);
+        }
+    }
+
+    #[test]
+    fn calls_from_several_threads_and_from_inside_a_piece() {
+        let list: Vec<u64> = (1..=1_000).collect();
+        std::thread::scope(|s| {
+            for _ in 0..4 {
+                s.spawn(|| {
+                    for _ in 0..50 {
+                        let inner = AtomicU64::new(0);
+                        in_parallel(&list[..64], 8, |piece| {
+                            inner.fetch_add(sum(&list) * piece.len() as u64, Ordering::Relaxed);
+                        });
+                        assert_eq!(inner.into_inner(), 500_500 * 64);
+                    }
+                });
+            }
+        });
+    }
+
+    #[test]
+    fn a_panicking_piece_panics_the_caller_and_the_pool_still_works() {
+        let list: Vec<u64> = (0..1_000).collect();
+        let result = std::panic::catch_unwind(|| {
+            in_parallel(&list, 8, |piece| assert!(!piece.contains(&777)));
+        });
+        assert!(result.is_err());
+        assert_eq!(sum(&list), 499_500);
     }
 }
 

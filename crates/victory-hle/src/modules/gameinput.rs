@@ -1158,7 +1158,21 @@ mod host {
                 // SAFETY: room for the state.
                 if unsafe { XInputGetState(slot as u32, &mut state) } == 0 {
                     self.empty_until[slot] = None;
-                    return Some(convert(&state.Gamepad));
+                    #[allow(unused_mut)]
+                    let mut pad = convert(&state.Gamepad);
+                    // Scripted keys press the stand-in pad's buttons on a
+                    // real pad too: with one connected the title reads the
+                    // pad, not the keyboard (an unattended run's Enter was
+                    // ignored until the pad went to sleep).
+                    #[cfg(feature = "diagnostics")]
+                    if slot == 0 {
+                        for vk in scripted() {
+                            for &(_, button) in super::FALLBACK_BUTTONS.iter().filter(|(k, _)| *k == vk) {
+                                pad.buttons |= button;
+                            }
+                        }
+                    }
+                    return Some(pad);
                 }
                 self.empty_until[slot] = Some(Instant::now() + EMPTY_SLOT_RECHECK);
             }

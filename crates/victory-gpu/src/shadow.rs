@@ -166,12 +166,20 @@ fn give_back_tiles(all: impl Iterator<Item = Vec<u8>>) {
 static SPARSE_WRITES: [std::sync::atomic::AtomicU64; 4] =
     [const { std::sync::atomic::AtomicU64::new(0) }; 4];
 
+/// Diagnostics: microseconds spent taking sparse snapshots.
+#[cfg(feature = "diagnostics")]
+static SNAPSHOT_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Logs and resets the counts above.
 #[cfg(feature = "diagnostics")]
 pub(crate) fn sparse_writes_text() -> String {
+    let snapshot_ms = SNAPSHOT_US.swap(0, Ordering::Relaxed) as f64 / 1e3;
     let [declared, taken, compared, differed] =
         [0, 1, 2, 3].map(|i| SPARSE_WRITES[i].swap(0, Ordering::Relaxed) as f64 / 1e6);
-    format!("declared {declared:.1} MB, snapshots {taken:.1} MB, compared {compared:.1} MB, differed {differed:.1} MB")
+    format!(
+        "declared {declared:.1} MB, snapshots {taken:.1} MB in {snapshot_ms:.0} ms, compared {compared:.1} MB, \
+         differed {differed:.1} MB"
+    )
 }
 
 /// Bytes of the snapshot memory kept for reuse.
@@ -2061,6 +2069,8 @@ impl Shadow {
         }
         #[cfg(feature = "diagnostics")]
         SPARSE_WRITES[1].fetch_add((new.len() * PAGE) as u64, Ordering::Relaxed);
+        #[cfg(feature = "diagnostics")]
+        let started = std::time::Instant::now();
         let mut bufs = pooled_tiles(new.len());
         let copies: Vec<(usize, usize)> =
             new.iter().zip(&mut bufs).map(|(&(_, view), buf)| (view, buf.as_mut_ptr() as usize)).collect();
@@ -2076,6 +2086,8 @@ impl Shadow {
             unsafe { buf.set_len(PAGE) };
             before.insert(tile, buf);
         }
+        #[cfg(feature = "diagnostics")]
+        SNAPSHOT_US.fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
     }
 
     /// [`Shadow::copy_back`] of a sparse copy, its tiles on several threads.
