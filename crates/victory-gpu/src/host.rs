@@ -773,6 +773,16 @@ pub(crate) fn dred_on() -> bool {
     })
 }
 
+/// Whether consecutive fills of a list that continue one another in title
+/// memory and in upload memory are made as one copy (on unless
+/// `VICTORY_MERGE_FILLS=0`). Runs 14-16 here: ~100,000 fills a frame of
+/// ~430 bytes each, ~180 ms of moves a frame, a cost per copy (the copy
+/// checks for unmapped pages, times itself, and may fall back).
+fn merge_fills() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_MERGE_FILLS").is_none_or(|v| v != "0"))
+}
+
 /// Whether a submission's lists go to the host queue in one
 /// `ExecuteCommandLists` (`VICTORY_MERGE_LISTS=1`, off by default): each
 /// call is a queue submission of its own under vkd3d-proton (run 20 here:
@@ -2797,7 +2807,47 @@ impl HostList {
         let mut refresh_count = 0u64;
         #[cfg(feature = "diagnostics")]
         let mut refresh_bytes = 0u64;
+        // Consecutive fills that continue one another in both title memory
+        // and upload memory are made as one copy ([`merge_fills`]): the same
+        // bytes, in the same order, nothing running between them.
+        let merging = merge_fills();
+        let mut pending: Option<(usize, usize, usize)> = None;
+        let fill = |(dst, src, len): (usize, usize, usize), copy_us: &mut u64, copy_bytes: &mut u64| {
+            let started = std::time::Instant::now();
+            copy_mapped(dst as *mut u8, src as *const u8, len, false);
+            *copy_us += started.elapsed().as_micros() as u64;
+            *copy_bytes += len as u64;
+            #[cfg(feature = "diagnostics")]
+            add(C::FillCopies, 1);
+        };
         for step in &deferred.copies {
+            if let &Step::Fill(dst, src, len) = step {
+                #[cfg(feature = "diagnostics")]
+                {
+                    copy_count += 1;
+                    add(C::FillSteps, 1);
+                }
+                if let Some((pd, ps, pl)) = pending {
+                    #[cfg(feature = "diagnostics")]
+                    if dst > pd + pl && dst - (pd + pl) <= 256 && src.checked_sub(ps + pl) == Some(dst - (pd + pl)) {
+                        add(C::FillsGapped, 1);
+                    }
+                    if pd + pl == dst && ps + pl == src {
+                        #[cfg(feature = "diagnostics")]
+                        add(C::FillsAdjacent, 1);
+                        if merging {
+                            pending = Some((pd, ps, pl + len));
+                            continue;
+                        }
+                    }
+                    fill((pd, ps, pl), &mut copy_us, &mut copy_bytes);
+                }
+                pending = Some((dst, src, len));
+                continue;
+            }
+            if let Some(p) = pending.take() {
+                fill(p, &mut copy_us, &mut copy_bytes);
+            }
             match step {
                 &Step::Copy(dst, src, len) => {
                     #[cfg(feature = "diagnostics")]
@@ -2815,16 +2865,7 @@ impl HostList {
                     copy_us += started.elapsed().as_micros() as u64;
                     copy_bytes += len as u64;
                 }
-                &Step::Fill(dst, src, len) => {
-                    #[cfg(feature = "diagnostics")]
-                    {
-                        copy_count += 1;
-                    }
-                    let started = std::time::Instant::now();
-                    copy_mapped(dst as *mut u8, src as *const u8, len, false);
-                    copy_us += started.elapsed().as_micros() as u64;
-                    copy_bytes += len as u64;
-                }
+                Step::Fill(..) => unreachable!("fills are made above"),
                 Step::Refresh(shadow, address, len) => {
                     #[cfg(feature = "diagnostics")]
                     {
@@ -2857,6 +2898,9 @@ impl HostList {
                     }
                 }
             }
+        }
+        if let Some(p) = pending.take() {
+            fill(p, &mut copy_us, &mut copy_bytes);
         }
         if copy_bytes > 0 || copy_us > 0 {
             PREPARING[0].fetch_add(copy_us, Ordering::Relaxed);
@@ -4972,5 +5016,40 @@ mod hole_tests {
         holes::clear();
         // SAFETY: our reservation.
         unsafe { VirtualFree(base as *mut _, 0, MEM_RELEASE) };
+    }
+}
+
+#[cfg(test)]
+mod fill_tests {
+    use super::*;
+
+    /// Fills that continue one another become one copy; a fill after a gap
+    /// or after a title copy stays apart; every byte lands as before.
+    #[test]
+    fn fills_merge_only_when_they_continue_one_another() {
+        let Some(host) = host() else { return };
+        let Ok(list) = host.new_list() else { return };
+        let src: Vec<u8> = (0..4096u32).map(|i| (i * 7 + 3) as u8).collect();
+        let mut dst = vec![0u8; 4096];
+        let (s, d) = (src.as_ptr(), dst.as_mut_ptr());
+        // SAFETY: inside both buffers.
+        unsafe {
+            list.defer_fill(d, s, 100);
+            list.defer_fill(d.add(100), s.add(100), 50);
+            list.defer_fill(d.add(150), s.add(150), 200);
+            // A gap: not merged.
+            list.defer_fill(d.add(400), s.add(400), 100);
+            // A title copy between: the fill after it is apart.
+            let mut title = vec![0u8; 16];
+            list.defer_copy(title.as_mut_ptr(), s.add(1000), 16);
+            list.defer_fill(d.add(500), s.add(500), 100);
+            let mut batch = Batch::default();
+            let _ = list.run_deferred(&mut batch);
+            assert_eq!(&title[..], &src[1000..1016]);
+        }
+        assert_eq!(&dst[..350], &src[..350], "merged fills");
+        assert!(dst[350..400].iter().all(|&b| b == 0), "the gap is left alone");
+        assert_eq!(&dst[400..600], &src[400..600]);
+        assert!(dst[600..].iter().all(|&b| b == 0));
     }
 }
