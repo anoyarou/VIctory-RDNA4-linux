@@ -94,6 +94,12 @@ pub(crate) const REFLECTIONS: (u8, u32) = (1, 40);
 /// shortcut: stands in for what the title's traced reflections would see.
 static KEEP: std::sync::Mutex<Option<f32>> = std::sync::Mutex::new(None);
 
+/// The least a reflection holds, as a part of the light around: a tenth
+/// number in the file (0, the default, leaves dark reflections dark).
+/// shortcut: without rays, what should mirror the sky (still water) sees
+/// nothing and is black; this gives it a part of the ambient light instead.
+static LEAST: std::sync::Mutex<f32> = std::sync::Mutex::new(0.0);
+
 fn keep() -> f32 {
     if let Some(live) = *KEEP.lock().unwrap_or_else(|e| e.into_inner()) {
         return live;
@@ -219,8 +225,10 @@ fn live_level() -> Option<f32> {
                     *FOLLOW.lock().unwrap_or_else(|e| e.into_inner()) = Some(None);
                     if let [s, r, n, t, ref last @ ..] = rest[..] {
                         *SHADE.lock().unwrap_or_else(|e| e.into_inner()) = Some([s, r, n, t]);
-                        if let [k] = last[..] {
+                        if let [k, ref floor @ ..] = last[..] {
                             *KEEP.lock().unwrap_or_else(|e| e.into_inner()) = Some(k.max(0.0));
+                            *LEAST.lock().unwrap_or_else(|e| e.into_inner()) =
+                                floor.first().map_or(0.0, |f| f.max(0.0));
                         }
                     }
                     let new = Some((level.max(0.0), [r, g, b]));
@@ -238,12 +246,12 @@ fn live_level() -> Option<f32> {
 }
 
 const SOURCE: &str = r#"
-#define RS "RootConstants(num32BitConstants=11, b0), DescriptorTable(UAV(u0), SRV(t0), SRV(t1))"
+#define RS "RootConstants(num32BitConstants=12, b0), DescriptorTable(UAV(u0), SRV(t0), SRV(t1))"
 cbuffer Floor : register(b0) {
     float level; float3 tint;
     float strength; float radius; float near; float tan_y;
     float gain; float least;
-    float held;
+    float held; float floor_part;
 };
 Texture2D<float3> sky : register(t1);
 // The light, from the sky's mean when it follows the sky (gain above 0).
@@ -321,7 +329,9 @@ void main(uint3 at : SV_DispatchThreadID) {
         float3 seen_there = unpack(light[at.xy]);
         float most = dot(from_around(), LUMA) * held;
         float has = dot(seen_there, LUMA);
+        float3 floor_light = from_around() * floor_part;
         if (has > most) light[at.xy] = pack(seen_there * (most / has));
+        else if (has < dot(floor_light, LUMA)) light[at.xy] = pack(floor_light);
         return;
     }
     float open = strength > 0.0 ? open_to_light(int2(at.xy), float2(w, h)) : 1.0;
@@ -536,8 +546,9 @@ fn record(list: &HostList, light: This, depth: Option<This>, held: f32) -> bool 
         let [strength, radius, near, tan_y] = shade();
         let strength = if depth.is_some() { strength } else { 0.0 };
         let [gain, least] = sky.map_or([0.0, 0.0], |(_, f)| f);
-        let constants = [level, r, g, b, strength, radius, near, tan_y, gain, least, held];
-        l.SetComputeRoot32BitConstants(0, 11, constants.as_ptr().cast(), 0);
+        let floor = *LEAST.lock().unwrap_or_else(|e| e.into_inner());
+        let constants = [level, r, g, b, strength, radius, near, tan_y, gain, least, held, floor];
+        l.SetComputeRoot32BitConstants(0, 12, constants.as_ptr().cast(), 0);
         l.SetComputeRootDescriptorTable(
             1,
             D3D12_GPU_DESCRIPTOR_HANDLE {

@@ -181,6 +181,14 @@ struct Bindless {
     unmapped_slots: std::collections::HashSet<u32>,
     /// Subset of `uses` holding a direct-memory window (checked for `is_dead`).
     direct_slots: std::collections::HashSet<u32>,
+    /// The count of windows that died ([`crate::shadow::died`]) the direct
+    /// slots were last looked at with.
+    died_seen: u64,
+    /// Slots came out otherwise since the whole plan was last built, with
+    /// nothing the plan lacks ([`LOOSE_FRAMES`]).
+    loose: bool,
+    /// The host resources those slots view, held by the plans until then.
+    extra: Vec<ID3D12Resource>,
     /// The released-view, placed-texture, and memory-remap epochs `uses` was checked at.
     checked: (u64, u64, u64),
     /// What submissions do for the slots, until they or what they view change.
@@ -208,106 +216,6 @@ struct Bindless {
     /// The frame (plus one) the plan's lists of everything were last made in,
     /// and whether slots changed since.
     full: (u64, bool),
-    /// Whether what the busy slots add to the plan's lists (reads, writes,
-    /// bounces, held resources) changed since those lists were made: slots
-    /// made again the same, the usual case, leave the lists as they are.
-    lists_changed: bool,
-    /// What the busy slots add to those lists, counted, kept as slots change.
-    lists: Lists,
-}
-
-/// A host copy's range: (the copy, address, bytes).
-type Range = (Arc<crate::shadow::Shadow>, usize, usize);
-
-/// Counted ranges by (copy, address, bytes): the range and how many slots add it.
-type Counted = BTreeMap<(usize, usize, usize), (Arc<crate::shadow::Shadow>, usize, usize, u32)>;
-
-/// What busy slots add to a plan's lists, each distinct entry once with the
-/// number of slots adding it, in the order the lists are made in.
-#[derive(Default)]
-struct Lists {
-    reads: Counted,
-    writes: Counted,
-    /// (title address, bounce slice, bytes) to slots.
-    bounces: BTreeMap<(u64, usize, u32), u32>,
-    /// Resources held for slots that read, by object.
-    retained: HashMap<usize, (ID3D12Resource, u32)>,
-}
-
-impl Lists {
-    fn count(map: &mut Counted, range: &Option<Range>, add: bool) {
-        let Some((s, a, l)) = range else { return };
-        let key = (Arc::as_ptr(s) as usize, *a, *l);
-        if add {
-            map.entry(key).or_insert_with(|| (s.clone(), *a, *l, 0)).3 += 1;
-        } else if let Some(e) = map.get_mut(&key) {
-            e.3 -= 1;
-            if e.3 == 0 {
-                map.remove(&key);
-            }
-        }
-    }
-
-    /// Busy slot use `u` adds to the lists, or (`add` false) no longer does.
-    fn change(&mut self, u: &SlotUse, add: bool) {
-        Self::count(&mut self.reads, &u.read, add);
-        Self::count(&mut self.writes, &u.write, add);
-        if let Some((slice, at, bytes)) = u.bounce {
-            let key = (at, slice, bytes);
-            if add {
-                *self.bounces.entry(key).or_insert(0) += 1;
-            } else if let Some(n) = self.bounces.get_mut(&key) {
-                *n -= 1;
-                if *n == 0 {
-                    self.bounces.remove(&key);
-                }
-            }
-        }
-        if u.read.is_some()
-            && let Some(r) = &u.retained
-        {
-            let key = windows::core::Interface::as_raw(r) as usize;
-            if add {
-                self.retained.entry(key).or_insert_with(|| (r.clone(), 0)).1 += 1;
-            } else if let Some(e) = self.retained.get_mut(&key) {
-                e.1 -= 1;
-                if e.1 == 0 {
-                    self.retained.remove(&key);
-                }
-            }
-        }
-    }
-
-    fn add(&mut self, u: &SlotUse) {
-        self.change(u, true);
-    }
-
-    fn remove(&mut self, u: &SlotUse) {
-        self.change(u, false);
-    }
-
-    /// Tests: the lists equal those made from every busy slot anew.
-    #[cfg(test)]
-    fn check<'a>(
-        &self,
-        busy: impl Iterator<Item = &'a SlotUse>,
-        reads: &[Range],
-        writes: &[Range],
-        bounces: &[(usize, u64, u32)],
-    ) {
-        let (mut r, mut w, mut bo) = (Vec::new(), Vec::new(), Vec::new());
-        for u in busy {
-            r.extend(u.read.clone());
-            w.extend(u.write.clone());
-            bo.extend(u.bounce);
-        }
-        let key = |v: &[Range]| v.iter().map(|(s, a, l)| (Arc::as_ptr(s) as usize, *a, *l)).collect::<Vec<_>>();
-        assert_eq!(key(reads), key(&merged(r, READ_GAP)), "counted reads");
-        assert_eq!(key(writes), key(&merged(w, 0)), "counted writes");
-        bo.sort_unstable_by_key(|b| (b.1, b.0, b.2));
-        bo.dedup();
-        assert_eq!(bounces, &bo[..], "counted bounces");
-    }
 }
 
 /// Time for making changed slots, at submission and at recording: an eighth
@@ -365,26 +273,6 @@ struct SlotUse {
     /// this of it.
     unmapped: bool,
     at: (u64, u64),
-}
-
-impl SlotUse {
-    /// Whether the plan's lists take the same from `self` as from `other`.
-    fn same_lists(&self, other: &SlotUse) -> bool {
-        fn same(
-            a: &Option<(Arc<crate::shadow::Shadow>, usize, usize)>,
-            b: &Option<(Arc<crate::shadow::Shadow>, usize, usize)>,
-        ) -> bool {
-            match (a, b) {
-                (None, None) => true,
-                (Some(a), Some(b)) => Arc::ptr_eq(&a.0, &b.0) && a.1 == b.1 && a.2 == b.2,
-                _ => false,
-            }
-        }
-        same(&self.read, &other.read)
-            && same(&self.write, &other.write)
-            && self.bounce == other.bounce
-            && (self.read.is_none() || self.retained == other.retained)
-    }
 }
 
 /// Placed textures reached only through bindless slots are uploaded when a
@@ -489,6 +377,8 @@ pub(crate) struct BindlessPlan {
     copied_in: AtomicU64,
     /// The host resources the slots view, held while a submission runs.
     _retained: Arc<Vec<ID3D12Resource>>,
+    /// Those of slots made since `_retained` was listed.
+    _extra: Vec<ID3D12Resource>,
 }
 
 // SAFETY: D3D12 resources are free-threaded; the rest is plain data.
@@ -650,6 +540,103 @@ fn view_slots(count: u32) -> u32 {
 /// Dynamic slots of a sampler heap capped at [`SAMPLERS`], for tables
 /// reaching past the title slots it keeps.
 const SAMPLER_DYNAMIC: u32 = 256;
+
+/// Diagnostics of [`HostHeap::bindless_plan`]: per part (the direct slots'
+/// check, the list of all slots, the look for stale views, the slots made,
+/// their results applied, the whole plan built again), the microseconds,
+/// the times it ran, the items it walked and those it found, summed and
+/// logged every 64 presented frames.
+static PLAN_NOTES: [[AtomicU64; 4]; 9] = [const { [const { AtomicU64::new(0) }; 4] }; 9];
+static PLAN_FRAME: AtomicU64 = AtomicU64::new(0);
+/// Slots the plan lacked something for, by what: bit 0 another write, bit 1
+/// another bounce, bit 2 a read outside the plan.
+static LACKS: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+/// Frames with such a slot, and with one lacking more than a bounce: the
+/// last frame counted, the count.
+static LACK_FRAMES: [[AtomicU64; 2]; 2] = [const { [const { AtomicU64::new(0) }; 2] }; 2];
+
+/// Whether the plan's unchanged part is kept from frame to frame
+/// (`VICTORY_PLAN_REUSE=0`: as before, for comparison).
+fn reuse() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_PLAN_REUSE").is_none_or(|v| v != "0"))
+}
+
+/// A plan built some frames ago may read memory no slot views any more:
+/// for at most this many frames.
+///
+/// shortcut: the plan is built again at once only for a slot that brings
+/// what it lacks (memory to read outside its ranges, another range to
+/// write, another bounce). One that only stops reading leaves its range in
+/// the plan, refreshed for nothing, until the next build: of 70,000 slots
+/// some hundred come out otherwise each frame, and building the plan for
+/// them took 10 to 14 ms a frame (run fps1).
+const LOOSE_FRAMES: u64 = 8;
+
+type Range = Option<(Arc<crate::shadow::Shadow>, usize, usize)>;
+
+fn same_range(x: &Range, y: &Range) -> bool {
+    match (x, y) {
+        (None, None) => true,
+        (Some((s, a, l)), Some((t, b, m))) => Arc::ptr_eq(s, t) && (a, l) == (b, m),
+        _ => false,
+    }
+}
+
+/// Whether `range` lies in one of `merged` (as [`merged`] leaves them).
+fn covered(merged: &[(Arc<crate::shadow::Shadow>, usize, usize)], range: &Range) -> bool {
+    let Some((shadow, address, len)) = range else { return true };
+    let key = (Arc::as_ptr(shadow) as usize, *address);
+    let after = merged.partition_point(|(s, a, _)| (Arc::as_ptr(s) as usize, *a) <= key);
+    after > 0 && {
+        let (s, a, l) = &merged[after - 1];
+        Arc::ptr_eq(s, shadow) && address + len <= a + l
+    }
+}
+
+/// Whether two uses of a slot put the same things in a plan.
+fn same_ranges(a: &SlotUse, b: &SlotUse) -> bool {
+    use windows::core::Interface;
+    let same = same_range;
+    same(&a.read, &b.read)
+        && same(&a.write, &b.write)
+        && a.bounce == b.bounce
+        && a.retained.as_ref().map(Interface::as_raw) == b.retained.as_ref().map(Interface::as_raw)
+}
+
+fn plan_note(part: usize, started: std::time::Instant, walked: usize, found: usize) {
+    let n = &PLAN_NOTES[part];
+    n[0].fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
+    n[1].fetch_add(1, Ordering::Relaxed);
+    n[2].fetch_add(walked as u64, Ordering::Relaxed);
+    n[3].fetch_add(found as u64, Ordering::Relaxed);
+    let frame = crate::queue::presented();
+    let last = PLAN_FRAME.load(Ordering::Relaxed);
+    if frame >= last + 64
+        && PLAN_FRAME.compare_exchange(last, frame, Ordering::Relaxed, Ordering::Relaxed).is_ok()
+    {
+        let frames = (frame - last).max(1) as f64;
+        const NAMES: [&str; 9] = ["direct slots", "all slots listed", "stale views", "slots made", "results applied", "whole plan", "differing (found: lacking)", "lacking a write (found: a bounce)", "lacking a read (found: gone with a write or bounce)"];
+        let mut text = String::new();
+        for (name, n) in NAMES.iter().zip(&PLAN_NOTES) {
+            let [us, runs, walked, found] = [0, 1, 2, 3].map(|k| n[k].swap(0, Ordering::Relaxed));
+            text.push_str(&format!(
+                "; {name}: {:.2} ms, {:.1} runs, {:.0} walked, {:.1} found",
+                us as f64 / 1e3 / frames,
+                runs as f64 / frames,
+                walked as f64 / frames,
+                found as f64 / frames
+            ));
+        }
+        let lacks = LACKS.each_ref().map(|n| n.swap(0, Ordering::Relaxed) as f64 / frames);
+        let [any, more] = LACK_FRAMES.each_ref().map(|n| n[1].swap(0, Ordering::Relaxed));
+        text.push_str(&format!(
+            "; slots lacking per frame, by write+bounce*2+read*4: {:.1?}; of {frames:.0} frames,              {any} had a lacking slot and {more} one lacking more than a bounce",
+            &lacks[1..]
+        ));
+        tracing::info!("bindless plan per frame{text}");
+    }
+}
 
 impl HostHeap {
     pub(crate) fn new(sampler: bool, count: u32) -> Option<Self> {
@@ -1273,13 +1260,8 @@ impl HostHeap {
 
     /// Slot `index` (viewing `entry`) is no longer one for bindless access.
     fn drop_bindless(&self, b: &mut Bindless, index: u32, entry: Option<(u32, u32)>) {
-        let old = b.uses.remove(&index);
-        if b.busy.remove(&index) {
-            b.lists_changed = true;
-            if let Some(old) = &old {
-                b.lists.remove(old);
-            }
-        }
+        b.uses.remove(&index);
+        b.busy.remove(&index);
         b.unmapped_slots.remove(&index);
         b.direct_slots.remove(&index);
         b.recorded.remove(&index);
@@ -1801,16 +1783,28 @@ impl HostHeap {
                 }
             }
             if viewed || mem_changed {
-                for &i in &b.direct_slots {
-                    if b.uses
-                        .get(&i)
-                        .and_then(|u| u.direct.as_ref())
-                        .is_some_and(|s| s.is_dead())
-                    {
-                        remade.push(i);
-                        dirty.insert(i);
+                let t = std::time::Instant::now();
+                // Only when a window died since: walking 65,000 to 85,000
+                // slots a frame found none dead in a frame out of two
+                // (7 to 10 ms, run bp1).
+                let died = crate::shadow::died();
+                let walked = if died != b.died_seen || cfg!(test) || !reuse() {
+                    b.died_seen = died;
+                    for &i in &b.direct_slots {
+                        if b.uses
+                            .get(&i)
+                            .and_then(|u| u.direct.as_ref())
+                            .is_some_and(|s| s.is_dead())
+                        {
+                            remade.push(i);
+                            dirty.insert(i);
+                        }
                     }
-                }
+                    b.direct_slots.len()
+                } else {
+                    0
+                };
+                plan_note(0, t, walked, remade.len());
                 for &i in &b.unmapped_slots {
                     if let Some(u) = b.uses.get(&i)
                         && (cfg!(test)
@@ -1821,6 +1815,7 @@ impl HostHeap {
                     }
                 }
             }
+            let t = std::time::Instant::now();
             let check: Vec<(u32, (u32, u32))> = if viewed {
                 b.slots
                     .iter()
@@ -1830,6 +1825,9 @@ impl HostHeap {
             } else {
                 Vec::new()
             };
+            if viewed {
+                plan_note(1, t, check.len(), 0);
+            }
             for i in &urgent {
                 dirty.remove(i);
             }
@@ -1847,7 +1845,12 @@ impl HostHeap {
                 made[i as usize] = 0;
             }
         }
-        todo.extend(stale_views(&check).into_iter().map(|(i, v)| (i, Some(v))));
+        let t = std::time::Instant::now();
+        let stale = stale_views(&check);
+        if !check.is_empty() {
+            plan_note(2, t, check.len(), stale.len());
+        }
+        todo.extend(stale.into_iter().map(|(i, v)| (i, Some(v))));
         let (started, left) = (std::time::Instant::now(), self.budget_left(0));
         let mut made_any = false;
         let mut fresh = Vec::new();
@@ -1869,18 +1872,74 @@ impl HostHeap {
             results.push((index, made));
         }
         self.budget_spend(0, started.elapsed().as_micros() as u64);
-        let mut guard = self.bindless.lock().unwrap_or_else(|e| e.into_inner());
-        let b = &mut *guard;
+        plan_note(3, started, count, 0);
+        let mut b = self.bindless.lock().unwrap_or_else(|e| e.into_inner());
+        let t_apply = std::time::Instant::now();
+        let applied = results.len();
+        // Whether a slot made reads, writes or keeps something else than
+        // before: only then is the whole plan built again. A thousand slots
+        // are made a frame, nearly all to what they were (run bp1).
+        let mut changed = !reuse();
+        // Diagnostics: slots that came out otherwise, of them those the
+        // plan lacks something for.
+        let (mut differing, mut added) = (0usize, 0usize);
+        // Why: another write, another bounce, a read outside the plan, gone.
+        let mut why = [0usize; 4];
+        let planned = b.plan.as_ref().map(|p| p.reads.clone());
         for (index, made) in results {
-            match made {
-                None => {
-                    let old = b.uses.remove(&index);
-                    if b.busy.remove(&index) {
-                        b.lists_changed = true;
-                        if let Some(old) = &old {
-                            b.lists.remove(old);
+            let old = b.uses.get(&index);
+            let differs = match (&made, old) {
+                (Some((_, Some(new))), Some(old)) => !same_ranges(new, old),
+                (None, None) | (Some((_, None)), None) => false,
+                _ => true,
+            };
+            if differs {
+                differing += 1;
+                let (wrote, bounced) = old.map_or((&None, None), |o| (&o.write, o.bounce));
+                let new = made.as_ref().and_then(|m| m.1.as_ref());
+                let mut bits = 0u8;
+                let lacks = match (new, &planned) {
+                    (_, None) => true,
+                    (Some(new), Some(reads)) => {
+                        let lacking = [
+                            !same_range(&new.write, wrote),
+                            new.bounce != bounced,
+                            !covered(reads, &new.read),
+                        ];
+                        for (n, l) in why.iter_mut().zip(lacking) {
+                            *n += usize::from(l);
+                        }
+                        bits |= u8::from(lacking[0]) | u8::from(lacking[1]) << 1 | u8::from(lacking[2]) << 2;
+                        lacking.contains(&true)
+                    }
+                    (None, Some(_)) => {
+                        let gone = wrote.is_some() || bounced.is_some();
+                        why[3] += usize::from(gone);
+                        bits |= u8::from(wrote.is_some()) | u8::from(bounced.is_some()) << 1;
+                        gone
+                    }
+                };
+                if bits != 0 {
+                    LACKS[bits as usize].fetch_add(1, Ordering::Relaxed);
+                    for (seen, only) in LACK_FRAMES.iter().zip([true, bits & 5 != 0]) {
+                        if only && seen[0].swap(frame, Ordering::Relaxed) != frame {
+                            seen[1].fetch_add(1, Ordering::Relaxed);
                         }
                     }
+                }
+                if lacks {
+                    added += 1;
+                    changed = true;
+                } else {
+                    b.loose = true;
+                    let held = new.filter(|n| n.read.is_some()).and_then(|n| n.retained.clone());
+                    b.extra.extend(held);
+                }
+            }
+            match made {
+                None => {
+                    b.uses.remove(&index);
+                    b.busy.remove(&index);
                     b.unmapped_slots.remove(&index);
                     b.direct_slots.remove(&index);
                 }
@@ -1892,19 +1951,7 @@ impl HostHeap {
                         b.record_pending.insert(index);
                         self.record_hint.store(true, Ordering::Release);
                     }
-                    let busy = u.read.is_some() || u.write.is_some() || u.bounce.is_some();
-                    let was = b.busy.contains(&index);
-                    let old = b.uses.get(&index).filter(|_| was);
-                    if busy != was || busy && !old.is_some_and(|old| old.same_lists(&u)) {
-                        b.lists_changed = true;
-                        if let Some(old) = old {
-                            b.lists.remove(old);
-                        }
-                        if busy {
-                            b.lists.add(&u);
-                        }
-                    }
-                    if busy {
+                    if u.read.is_some() || u.write.is_some() || u.bounce.is_some() {
                         b.busy.insert(index);
                     } else {
                         b.busy.remove(&index);
@@ -1921,16 +1968,20 @@ impl HostHeap {
                     }
                     b.uses.insert(index, u);
                 }
-                Some((e, None)) => self.drop_bindless(b, index, Some(e)),
+                Some((e, None)) => self.drop_bindless(&mut b, index, Some(e)),
             }
         }
+        plan_note(4, t_apply, applied, differing);
+        plan_note(6, t_apply, differing, added);
+        plan_note(7, t_apply, why[0], why[1]);
+        plan_note(8, t_apply, why[2], why[3]);
         if let Some(index) = over {
             b.dirty.insert(index);
         }
         b.dirty.extend(todo.map(|(i, _)| i));
         BACKLOG[0].store(b.dirty.len() as u64, Ordering::Relaxed);
         BACKLOG[1].store(b.record_pending.len() as u64, Ordering::Relaxed);
-        b.full.1 |= made_any;
+        b.full.1 |= made_any && changed || b.loose && frame >= b.full.0 + LOOSE_FRAMES;
         let remake = b.full.1 && b.full.0 != frame || cfg!(test);
         if !made_any && (!b.full.1 || !remake) && let Some(plan) = &b.plan {
             return Some(plan.clone());
@@ -1946,51 +1997,39 @@ impl HostHeap {
                 fresh_reads,
                 copied_in: AtomicU64::new(0),
                 _retained: plan._retained.clone(),
+                _extra: b.extra.clone(),
             });
             b.plan = Some(plan.clone());
             return Some(plan);
         }
         b.full = (frame, false);
-        // The same lists as last time when no busy slot changed what it adds
-        // (they are made from those slots alone): going over every busy slot
-        // was a third of the submitting thread's time.
-        if !b.lists_changed && let Some(plan) = &b.plan {
-            let plan = Arc::new(BindlessPlan {
-                reads: plan.reads.clone(),
-                writes: plan.writes.clone(),
-                bounces: plan.bounces.clone(),
-                fresh,
-                fresh_reads,
-                copied_in: AtomicU64::new(0),
-                _retained: plan._retained.clone(),
-            });
-            b.plan = Some(plan.clone());
-            return Some(plan);
-        }
-        b.lists_changed = false;
-        // From the busy slots' counted contributions: each distinct entry
-        // once, already in order (going over every busy slot, two lookups
-        // each, was a tenth of the submitting thread's time while walking).
+        b.loose = false;
+        b.extra.clear();
+        let t_full = std::time::Instant::now();
+        let (mut reads, mut writes, mut bounces, mut retained) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         // What slots view is held by the slots, and for some frames after
         // (`host::retire`).
-        let reads: Vec<Range> = b.lists.reads.values().map(|(s, a, l, _)| (s.clone(), *a, *l)).collect();
-        let writes: Vec<Range> = b.lists.writes.values().map(|(s, a, l, _)| (s.clone(), *a, *l)).collect();
-        let bounces: Vec<(usize, u64, u32)> =
-            b.lists.bounces.keys().map(|&(at, slice, bytes)| (slice, at, bytes)).collect();
-        let retained: Vec<ID3D12Resource> = b.lists.retained.values().map(|(r, _)| r.clone()).collect();
-        let (reads, writes) = (merged(reads, READ_GAP), merged(writes, 0));
-        #[cfg(test)]
-        b.lists.check(b.busy.iter().filter_map(|i| b.uses.get(i)), &reads, &writes, &bounces);
+        for u in b.busy.iter().filter_map(|i| b.uses.get(i)) {
+            reads.extend(u.read.clone());
+            writes.extend(u.write.clone());
+            bounces.extend(u.bounce);
+            retained.extend(u.read.is_some().then(|| u.retained.clone()).flatten());
+        }
+        bounces.sort_unstable_by_key(|b| b.1);
+        let (n_busy, n_reads) = (b.busy.len(), reads.len());
         let plan = Arc::new(BindlessPlan {
-            reads: Arc::new(reads),
-            writes: Arc::new(writes),
+            reads: Arc::new(merged(reads, READ_GAP)),
+            writes: Arc::new(merged(writes, 0)),
             bounces: Arc::new(bounces),
             fresh,
             fresh_reads,
             copied_in: AtomicU64::new(0),
             _retained: Arc::new(retained),
+            _extra: Vec::new(),
         });
         b.plan = Some(plan.clone());
+        plan_note(5, t_full, n_busy, n_reads);
         Some(plan)
     }
 
@@ -3683,20 +3722,6 @@ void main(uint3 id : SV_DispatchThreadID) {
             "only the written slot is made again"
         );
         assert_ne!(host_heap.made.lock().unwrap()[1], 0);
-
-        // Written again the same: the slot is made again, the lists kept.
-        cbv(mem.address() + 0x1000, 1);
-        let third = host_heap.bindless_plan().unwrap();
-        assert!(
-            Arc::ptr_eq(&second.reads, &third.reads),
-            "a slot made again the same keeps the lists"
-        );
-        // Pointed elsewhere: the lists are made again.
-        cbv(mem.address() + 0x2000, 1);
-        let fourth = host_heap.bindless_plan().unwrap();
-        assert!(!Arc::ptr_eq(&third.reads, &fourth.reads), "a changed slot remakes the lists");
-        assert_eq!(fourth.reads.len(), 1);
-        assert_eq!(fourth.reads[0].2, 0x2100);
 
         let release = |o: This| slot::<extern "system" fn(This) -> u32>(o, 0x10)(o);
         assert_eq!(release(title_heap), 0);

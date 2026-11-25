@@ -1270,6 +1270,15 @@ fn direct(address: u64, end: u64) -> Option<Arc<Shadow>> {
     Some(window)
 }
 
+/// Counts windows of title memory used in place that died (the title
+/// mapped other memory there): who holds such windows looks at them again
+/// only when it moved ([`died`]).
+static DIED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn died() -> u64 {
+    DIED.load(Ordering::Acquire)
+}
+
 /// Stretches shorter than this are copied: each window is a host heap.
 const STRETCH_LEAST: usize = 4 << 20;
 
@@ -1416,10 +1425,12 @@ pub(crate) fn remapped(start: u64, end: u64) {
         gone.insert(s.buffer.as_raw() as usize);
         if let Some(d) = &s.direct {
             d.dead.store(true, Ordering::Release);
+            DIED.fetch_add(1, Ordering::Release);
             for (_, a) in d.aliases.lock().unwrap_or_else(|e| e.into_inner()).iter() {
                 gone.insert(a.buffer.as_raw() as usize);
                 if let Some(d) = &a.direct {
                     d.dead.store(true, Ordering::Release);
+            DIED.fetch_add(1, Ordering::Release);
                 }
             }
         }

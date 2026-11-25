@@ -3655,6 +3655,44 @@ struct Presenter {
     copy: HostList,
     hwnd: HWND,
     meter: Meter,
+    /// One render target view, for the back buffer the readout is drawn on.
+    rtv: ID3D12DescriptorHeap,
+}
+
+impl Presenter {
+    /// Writes the frame rate and frame time in the top left corner of
+    /// `back`, which is a render target on `list`.
+    ///
+    /// # Safety
+    /// `back` is this swap chain's buffer, in the render target state.
+    unsafe fn readout(&self, device: &ID3D12Device, list: &ID3D12GraphicsCommandList, back: &ID3D12Resource) {
+        let Some((fps, ms)) = self.meter.shown else { return };
+        if !crate::readout::on() {
+            return;
+        }
+        let text = format!("{fps:.1} FPS  {ms:.0} MS");
+        // Dots that keep their share of the picture at any size.
+        let dot = (self.height as i32 / 216).max(2);
+        let at = (dot * 3, dot * 3);
+        let (w, h) = crate::readout::size(&text);
+        let behind = RECT {
+            left: at.0,
+            top: at.1,
+            right: at.0 + w * dot,
+            bottom: at.1 + h * dot,
+        };
+        let marks = crate::readout::rects(&text, at, dot);
+        // SAFETY: our heap of one view, and rectangles inside the picture
+        // (a text of a few characters at this size).
+        unsafe {
+            let view = self.rtv.GetCPUDescriptorHandleForHeapStart();
+            device.CreateRenderTargetView(back, None, view);
+            if behind.right <= self.width as i32 && behind.bottom <= self.height as i32 {
+                list.ClearRenderTargetView(view, &[0.0, 0.0, 0.0, 1.0], Some(&[behind]));
+                list.ClearRenderTargetView(view, &[1.0, 0.9, 0.1, 1.0], Some(&marks));
+            }
+        }
+    }
 }
 
 /// The frame rate, shown in the window's caption every second and logged
@@ -3666,6 +3704,8 @@ struct Meter {
     logged: std::time::Instant,
     /// The caption the window had, once read.
     caption: Option<Vec<u16>>,
+    /// The frames a second and milliseconds a frame of the last second.
+    shown: Option<(f64, f64)>,
 }
 
 impl Meter {
@@ -3677,6 +3717,7 @@ impl Meter {
             drawn: crate::draw::drawn(),
             logged: now,
             caption: None,
+            shown: None,
         }
     }
 
@@ -3697,6 +3738,7 @@ impl Meter {
         let ms = elapsed.as_secs_f64() * 1000.0 / frames;
         let draws = (drawn - self.drawn) as f64 / frames;
         (self.since, self.frames, self.drawn) = (std::time::Instant::now(), 0, drawn);
+        self.shown = Some((fps, ms));
         // Of a frame, ms preparing submissions and ms waiting for the GPU.
         let [cpu, gpu] = [0, 1].map(|i| {
             SUBMISSION_US[i].swap(0, Ordering::Relaxed) as f64 / 1000.0 / frames
@@ -3854,14 +3896,13 @@ impl Host {
             let probe = crate::capture::probe(&self.device, list, texture);
             #[cfg(not(feature = "diagnostics"))]
             let _ = frame;
+            let target = D3D12_RESOURCE_STATE_RENDER_TARGET;
             list.ResourceBarrier(&[
                 transition(texture, D3D12_RESOURCE_STATE_COPY_SOURCE, state),
-                transition(
-                    &back,
-                    D3D12_RESOURCE_STATE_COPY_DEST,
-                    D3D12_RESOURCE_STATE_PRESENT,
-                ),
+                transition(&back, D3D12_RESOURCE_STATE_COPY_DEST, target),
             ]);
+            p.readout(&self.device, list, &back);
+            list.ResourceBarrier(&[transition(&back, target, D3D12_RESOURCE_STATE_PRESENT)]);
             p.copy.close();
             self.execute(&[&p.copy]);
             #[cfg(feature = "diagnostics")]
@@ -3932,6 +3973,7 @@ impl Host {
             }
             list.ResourceBarrier(&into);
             crate::compose::record(self, list, planes, &back, (width, height, format));
+            p.readout(&self.device, list, &back);
             #[cfg(feature = "diagnostics")]
             let capture = {
                 list.ResourceBarrier(&[transition(&back, target, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
@@ -3987,6 +4029,12 @@ impl Host {
                 .cast::<IDXGISwapChain3>()?;
             let copy = self.new_list()?;
             copy.close();
+            let rtv: ID3D12DescriptorHeap =
+                self.device.CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
+                    Type: D3D12_DESCRIPTOR_HEAP_TYPE_RTV,
+                    NumDescriptors: 1,
+                    ..Default::default()
+                })?;
             tracing::info!(width, height, format = format.0, "presenting to a window");
             Ok(Presenter {
                 swap_chain,
@@ -3996,6 +4044,7 @@ impl Host {
                 copy,
                 hwnd,
                 meter: Meter::new(),
+                rtv,
             })
         }
     }
