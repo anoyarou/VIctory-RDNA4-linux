@@ -588,7 +588,7 @@ impl Shadow {
             let mut read: Option<Vec<u8>> = None;
             let mut synced = Vec::new();
             #[cfg(feature = "diagnostics")]
-            let mut cb = [0u64; 6]; // pieces, differ, compare, read, write (us), after (us)
+            let mut cb = [0u64; 8]; // pieces, differ, compare, read, merge, writing, write, after (us)
             #[cfg(feature = "diagnostics")]
             crate::copystat::add(crate::copystat::C::CbDeclared, (to - from) as u64);
             let mut at = from;
@@ -633,14 +633,25 @@ impl Shadow {
                         }
                         // Title memory with the GPU's bytes put in; the copy
                         // takes the title's bytes in turn.
-                        if let Some((dirty_start, dirty_end)) =
-                            merge_gpu_writes(title_slice, host, old)
+                        let merged = merge_gpu_writes(title_slice, host, old);
+                        #[cfg(feature = "diagnostics")]
+                        let t4 = std::time::Instant::now();
+                        #[cfg(feature = "diagnostics")]
                         {
+                            cb[4] += (t4 - t2).as_micros() as u64;
+                        }
+                        if let Some((dirty_start, dirty_end)) = merged {
                             if mode != 1 {
                                 crate::watch::writing(
                                     start + at + dirty_start,
                                     dirty_end - dirty_start,
                                 );
+                            }
+                            #[cfg(feature = "diagnostics")]
+                            let t5 = std::time::Instant::now();
+                            #[cfg(feature = "diagnostics")]
+                            {
+                                cb[5] += (t5 - t4).as_micros() as u64;
                             }
                             // Only the runs of bytes the GPU changed go back:
                             // the title's threads keep running, and a title
@@ -660,10 +671,10 @@ impl Shadow {
                                 );
                                 written += len;
                             }
-                        }
-                        #[cfg(feature = "diagnostics")]
-                        {
-                            cb[4] += t2.elapsed().as_micros() as u64;
+                            #[cfg(feature = "diagnostics")]
+                            {
+                                cb[6] += t5.elapsed().as_micros() as u64;
+                            }
                         }
                         synced.push((start + at) / PAGE);
                     }
@@ -699,8 +710,8 @@ impl Shadow {
             #[cfg(feature = "diagnostics")]
             {
                 use crate::copystat::{C, add};
-                cb[5] += t3.elapsed().as_micros() as u64;
-                for (c, v) in [C::CbPieces, C::CbDiffer, C::CbCompareUs, C::CbReadUs, C::CbWriteUs, C::CbAfterUs].into_iter().zip(cb) {
+                cb[7] += t3.elapsed().as_micros() as u64;
+                for (c, v) in [C::CbPieces, C::CbDiffer, C::CbCompareUs, C::CbReadUs, C::CbMergeUs, C::CbWritingUs, C::CbWriteUs, C::CbAfterUs].into_iter().zip(cb) {
                     add(c, v);
                 }
             }
