@@ -817,12 +817,6 @@ impl State {
         if !self.bind(list, p, false) {
             return false;
         }
-        // The title's exposure is drawn to the first target of this program.
-        if p.stages.iter().any(|s| s.shader.calculates_exposure)
-            && let Some(&target) = self.targets.first()
-        {
-            crate::ambient::note_exposure(target as This);
-        }
         if p.stages.iter().any(|s| s.shader.draws_sky)
             && let Some(&sky) = self.targets.first()
         {
