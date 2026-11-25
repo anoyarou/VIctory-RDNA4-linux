@@ -3257,6 +3257,12 @@ pub(crate) fn copy_mapped(dst: *mut u8, src: *const u8, len: usize, title_dst: b
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::WritingUs, opened.elapsed().as_micros() as u64);
     }
+    // Pages a copy found unmapped this frame are not read again (each
+    // failed read is an exception, and its fallback more of them).
+    if holes::any() && holes::meets(src as usize, len) {
+        read_around_holes(src, dst, len);
+        return;
+    }
     #[cfg(feature = "diagnostics")]
     let moved = std::time::Instant::now();
     let whole = read(src, dst, len);
@@ -3276,6 +3282,160 @@ pub(crate) fn copy_mapped(dst: *mut u8, src: *const u8, len: usize, title_dst: b
     }
     #[cfg(feature = "diagnostics")]
     crate::copystat::add(crate::copystat::C::FallbackUs, fell.elapsed().as_micros() as u64);
+}
+
+/// 64 KiB pages of title memory a copy found unmapped (not committed, or no
+/// access), so that later copies over them write zeros at once instead of
+/// faulting again: in run 16 here (RX 9070 XT, Proton Experimental, standing
+/// still) about 1,100 copies a frame met unmapped memory, 97 ms of fallback
+/// reads and 303 MB of zeros a frame; under Wine every failed read is an
+/// exception dispatch, and the fallback reads in pieces fault again.
+///
+/// A page is only noted after `VirtualQuery` says its whole 64 KiB is not
+/// committed or not accessible, and each copy that meets a noted page asks
+/// again (one query, no fault): not every commit is reported (the title's
+/// own `VirtualAlloc`, constrained `XMemVirtualAlloc`). What the title maps
+/// or commits through the runtime is forgotten at once
+/// ([`crate::watch::title_memory_remapped`], `title_memory_committed`,
+/// `title_memory_view`), and everything at each presented frame.
+pub(crate) mod holes {
+    use std::collections::BTreeSet;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    pub(crate) const PAGE: usize = 64 << 10;
+
+    struct Holes {
+        frame: u64,
+        pages: BTreeSet<usize>,
+    }
+
+    static HOLES: Mutex<Holes> = Mutex::new(Holes { frame: 0, pages: BTreeSet::new() });
+    /// How many pages are noted: copies look without the lock while none are.
+    static COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    fn locked() -> std::sync::MutexGuard<'static, Holes> {
+        let mut h = HOLES.lock().unwrap_or_else(|e| e.into_inner());
+        let frame = frame();
+        if h.frame != frame {
+            h.frame = frame;
+            h.pages.clear();
+            COUNT.store(0, Ordering::Release);
+        }
+        h
+    }
+
+    fn frame() -> u64 {
+        if cfg!(test) { 0 } else { crate::queue::presented() }
+    }
+
+    /// Whether any page is noted (one load, no lock).
+    pub(crate) fn any() -> bool {
+        COUNT.load(Ordering::Acquire) != 0
+    }
+
+    /// Whether a noted page lies in `[at, at + len)`.
+    pub(crate) fn meets(at: usize, len: usize) -> bool {
+        len != 0 && locked().pages.range(at / PAGE..(at + len).div_ceil(PAGE)).next().is_some()
+    }
+
+    /// Whether the page holding `at` is noted.
+    pub(crate) fn contains(at: usize) -> bool {
+        locked().pages.contains(&(at / PAGE))
+    }
+
+    /// Notes the pages lying whole in `[from, to)`, memory `VirtualQuery`
+    /// found not committed or not accessible, around `near`, where a copy
+    /// met it: at most 256 MB of a huge hole at a time.
+    pub(crate) fn note(from: usize, to: usize, near: usize) {
+        let (mut first, mut last) = (from.div_ceil(PAGE), to / PAGE);
+        if first >= last {
+            return;
+        }
+        const MOST: usize = 4096;
+        if last - first > MOST {
+            first = (near / PAGE).saturating_sub(MOST / 2).clamp(first, last - MOST);
+            last = first + MOST;
+        }
+        let mut h = locked();
+        for page in first..last {
+            h.pages.insert(page);
+        }
+        COUNT.store(h.pages.len(), Ordering::Release);
+    }
+
+    /// The title mapped or committed `[at, at + len)`.
+    pub(crate) fn forget(at: usize, len: usize) {
+        if !any() || len == 0 {
+            return;
+        }
+        let mut h = locked();
+        let pages: Vec<usize> = h.pages.range(at / PAGE..(at + len).div_ceil(PAGE)).copied().collect();
+        for page in pages {
+            h.pages.remove(&page);
+        }
+        COUNT.store(h.pages.len(), Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear() {
+        let mut h = locked();
+        h.pages.clear();
+        COUNT.store(0, Ordering::Release);
+    }
+}
+
+/// After a failed read at `at`: if `VirtualQuery` says the memory there is
+/// not committed or not accessible, notes its whole 64 KiB pages as holes.
+fn learn_hole(at: usize) {
+    use windows_sys::Win32::System::Memory::{MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_NOACCESS, VirtualQuery};
+    // SAFETY: plain data filled in by the query.
+    let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: a valid out pointer of the right size.
+    if unsafe { VirtualQuery(at as *const _, &mut info, size_of_val(&info)) } != size_of_val(&info) {
+        return;
+    }
+    if info.State != MEM_COMMIT || info.Protect == PAGE_NOACCESS {
+        let from = info.BaseAddress as usize;
+        holes::note(from, from + info.RegionSize, at);
+    }
+}
+
+/// Whether `at` is still not committed or not accessible.
+fn still_a_hole(at: usize) -> bool {
+    use windows_sys::Win32::System::Memory::{MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_NOACCESS, VirtualQuery};
+    // SAFETY: plain data filled in by the query.
+    let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: a valid out pointer of the right size.
+    let n = unsafe { VirtualQuery(at as *const _, &mut info, size_of_val(&info)) };
+    n == size_of_val(&info)
+        && (info.State != MEM_COMMIT || info.Protect == PAGE_NOACCESS)
+        && info.BaseAddress as usize + info.RegionSize >= (at / holes::PAGE + 1) * holes::PAGE
+}
+
+/// A copy over noted holes: zeros for those still holes, the rest read as
+/// usual. Each noted page is confirmed with one `VirtualQuery` (instead of
+/// a failed read and the faults of its fallback): the title's own
+/// `VirtualAlloc` goes to the host unreported, and may commit a page
+/// between two copies.
+fn read_around_holes(src: *const u8, dst: *mut u8, len: usize) {
+    for_pieces(src as usize, len, holes::PAGE, |at, n| {
+        let to = dst.wrapping_add(at - src as usize);
+        if holes::contains(at) && !still_a_hole(at) {
+            holes::forget(at, n);
+        }
+        if holes::contains(at) {
+            #[cfg(feature = "diagnostics")]
+            {
+                crate::copystat::add(crate::copystat::C::HoleSkips, 1);
+                crate::copystat::add(crate::copystat::C::Unmapped, n as u64);
+            }
+            // SAFETY: inside the destination, which is mapped.
+            unsafe { to.write_bytes(0, n) };
+        } else if !read(at as *const u8, to, n) {
+            read_pieces(at as *const u8, to, n);
+        }
+    });
 }
 
 /// After a failed bulk read into host memory, skip contiguous holes. Never
@@ -3299,6 +3459,8 @@ fn read_sparse(src: *const u8, dst: *mut u8, len: usize) {
             break;
         }
         if info.State != MEM_COMMIT || info.Protect == PAGE_NOACCESS {
+            let from = info.BaseAddress as usize;
+            holes::note(from, from + info.RegionSize, at as usize);
             #[cfg(feature = "diagnostics")]
             crate::copystat::add(crate::copystat::C::Unmapped, n as u64);
             // SAFETY: this path is only used with a writable host destination.
@@ -3317,9 +3479,14 @@ fn read_pieces(src: *const u8, dst: *mut u8, len: usize) {
     for_pieces(src as usize, len, 64 << 10, |at, n| {
         let to = dst.wrapping_add(at - src as usize);
         if !read(at as *const u8, to, n) {
+            let mut learned = false;
             for_pieces(at, n, 4 << 10, |at, n| {
                 let to = dst.wrapping_add(at - src as usize);
                 if !read(at as *const u8, to, n) {
+                    if !learned {
+                        learned = true;
+                        learn_hole(at);
+                    }
                     #[cfg(feature = "diagnostics")]
                     crate::copystat::add(crate::copystat::C::Unmapped, n as u64);
                     // SAFETY: inside the destination, which is mapped.
@@ -4672,4 +4839,76 @@ fn wait_if_removed(device: &ID3D12Device, error: &windows::core::Error) {
         tracing::error!(?reason, layer = ?host().and_then(|h| h.log_messages()), "host GPU device gone");
     });
     std::thread::sleep(std::time::Duration::from_secs(20));
+}
+
+#[cfg(test)]
+mod hole_tests {
+    use super::holes::{self, PAGE};
+    use super::*;
+    use windows_sys::Win32::System::Memory::{
+        MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_NOACCESS, PAGE_READWRITE, VirtualAlloc, VirtualFree,
+    };
+
+    // The cache is one for the process: these tests take turns.
+    static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Noting, the cap around the copy that met a huge hole, and forgetting.
+    #[test]
+    fn holes_are_noted_capped_and_forgotten() {
+        let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
+        holes::clear();
+        assert!(!holes::any());
+        holes::note(10 * PAGE + 1, 13 * PAGE, 11 * PAGE);
+        assert!(holes::contains(11 * PAGE) && holes::contains(12 * PAGE));
+        assert!(!holes::contains(10 * PAGE), "only whole pages");
+        assert!(!holes::contains(13 * PAGE));
+        assert!(holes::meets(12 * PAGE + 5, 10) && !holes::meets(20 * PAGE, PAGE));
+        holes::forget(11 * PAGE, 1);
+        assert!(!holes::contains(11 * PAGE) && holes::contains(12 * PAGE));
+        holes::clear();
+        let (from, to, near) = (1_000 * PAGE, 100_000 * PAGE, 50_000 * PAGE);
+        holes::note(from, to, near);
+        assert!(holes::contains(near) && holes::contains(near - 2_000 * PAGE));
+        assert!(!holes::contains(from) && !holes::contains(to - PAGE), "256 MB around the copy");
+        holes::clear();
+    }
+
+    /// A copy over reserved pages: zeros there, the data elsewhere, the
+    /// reserved pages noted (and not read again), and a page the title
+    /// commits read again once that is reported.
+    #[test]
+    fn a_copy_learns_unmapped_pages_and_forgets_committed_ones() {
+        let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
+        holes::clear();
+        // SAFETY: a fresh reservation of ours, freed at the end.
+        let base = unsafe { VirtualAlloc(std::ptr::null(), 3 * PAGE, MEM_RESERVE, PAGE_NOACCESS) } as usize;
+        assert_ne!(base, 0);
+        // SAFETY: commits the middle page of our reservation.
+        assert!(!unsafe { VirtualAlloc((base + PAGE) as *const _, PAGE, MEM_COMMIT, PAGE_READWRITE) }.is_null());
+        // SAFETY: the committed page.
+        unsafe { ((base + PAGE) as *mut u8).write_bytes(7, PAGE) };
+        let mut out = vec![1u8; 3 * PAGE];
+        copy_mapped(out.as_mut_ptr(), base as *const u8, 3 * PAGE, false);
+        assert!(out[..PAGE].iter().all(|&b| b == 0) && out[2 * PAGE..].iter().all(|&b| b == 0));
+        assert!(out[PAGE..2 * PAGE].iter().all(|&b| b == 7));
+        assert!(holes::contains(base) && holes::contains(base + 2 * PAGE), "the reserved pages are noted");
+        assert!(!holes::contains(base + PAGE), "not the committed one");
+        // Again, from the notes: same result.
+        out.fill(1);
+        copy_mapped(out.as_mut_ptr(), base as *const u8, 3 * PAGE, false);
+        assert!(out[..PAGE].iter().all(|&b| b == 0) && out[PAGE..2 * PAGE].iter().all(|&b| b == 7));
+        // The title commits the last page and fills it.
+        // SAFETY: commits the last page of our reservation.
+        assert!(!unsafe { VirtualAlloc((base + 2 * PAGE) as *const _, PAGE, MEM_COMMIT, PAGE_READWRITE) }.is_null());
+        // SAFETY: the page just committed.
+        unsafe { ((base + 2 * PAGE) as *mut u8).write_bytes(9, PAGE) };
+        crate::watch::title_memory_committed(base + 2 * PAGE, PAGE);
+        assert!(!holes::contains(base + 2 * PAGE));
+        copy_mapped(out.as_mut_ptr(), base as *const u8, 3 * PAGE, false);
+        assert!(out[2 * PAGE..].iter().all(|&b| b == 9), "read again once committed");
+        assert!(out[..PAGE].iter().all(|&b| b == 0));
+        holes::clear();
+        // SAFETY: our reservation.
+        unsafe { VirtualFree(base as *mut _, 0, MEM_RELEASE) };
+    }
 }

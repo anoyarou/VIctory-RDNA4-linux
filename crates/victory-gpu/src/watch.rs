@@ -699,6 +699,7 @@ fn aliases(at: usize) -> Vec<usize> {
 /// same pages guarded at another view are opened: their copies check them
 /// again, which also guards the new view with them.
 pub fn title_memory_view(at: usize, len: usize, section: usize, offset: u64) {
+    crate::host::holes::forget(at, len);
     if !view_guard() || len == 0 || !at.is_multiple_of(BLOCK) || !offset.is_multiple_of(BLOCK as u64) {
         return;
     }
@@ -1052,6 +1053,7 @@ pub fn writing(at: usize, len: usize) {
 /// shows is new and read-write, so it is no longer guarded, and any placed
 /// textures backed by that range are evicted.
 pub fn title_memory_remapped(at: usize, len: usize) {
+    crate::host::holes::forget(at, len);
     REGIONS.lock().unwrap_or_else(|e| e.into_inner()).clear();
     if len == 0 {
         return;
@@ -1106,6 +1108,7 @@ pub fn title_memory_remapped(at: usize, len: usize) {
 
 /// The title committed memory `[at, at + len)` it had reserved.
 pub fn title_memory_committed(at: usize, len: usize) {
+    crate::host::holes::forget(at, len);
     if len != 0 {
         crate::shadow::filled(at as u64, (at + len) as u64);
     }
