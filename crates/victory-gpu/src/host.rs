@@ -1610,11 +1610,26 @@ impl Host {
         back: Vec<(std::sync::Arc<crate::shadow::Shadow>, usize, usize)>,
     ) {
         let copying = std::time::Instant::now();
-        if back.len() <= 1 {
-            for (shadow, address, len) in &back {
-                let written = shadow.copy_back(*address, *len);
-                COPY_BACK[1].fetch_add(written as u64, Ordering::Relaxed);
+        // Diagnostics: each group's time, their sum and the longest.
+        let timed = |run: &dyn Fn()| {
+            #[cfg(feature = "diagnostics")]
+            let started = std::time::Instant::now();
+            run();
+            #[cfg(feature = "diagnostics")]
+            {
+                let us = started.elapsed().as_micros() as u64;
+                crate::copystat::add(crate::copystat::C::CbGroups, 1);
+                crate::copystat::add(crate::copystat::C::CbGroupUs, us);
+                crate::copystat::longest_group(us);
             }
+        };
+        if back.len() <= 1 {
+            timed(&|| {
+                for (shadow, address, len) in &back {
+                    let written = shadow.copy_back(*address, *len);
+                    COPY_BACK[1].fetch_add(written as u64, Ordering::Relaxed);
+                }
+            });
         } else {
             // Group by Shadow pointer so distinct shadows run in parallel
             // across CPU cores without lock contention on `before`/`pending`.
@@ -1631,21 +1646,27 @@ impl Host {
                 }
             }
             if groups.len() <= 1 {
-                for (shadow, address, len) in &groups[0] {
-                    let written = shadow.copy_back(*address, *len);
-                    COPY_BACK[1].fetch_add(written as u64, Ordering::Relaxed);
-                }
+                timed(&|| {
+                    for (shadow, address, len) in &groups[0] {
+                        let written = shadow.copy_back(*address, *len);
+                        COPY_BACK[1].fetch_add(written as u64, Ordering::Relaxed);
+                    }
+                });
             } else {
                 in_parallel(&groups, 8, |chunk| {
                     for g in chunk {
-                        for (shadow, address, len) in g {
-                            let written = shadow.copy_back(*address, *len);
-                            COPY_BACK[1].fetch_add(written as u64, Ordering::Relaxed);
-                        }
+                        timed(&|| {
+                            for (shadow, address, len) in g {
+                                let written = shadow.copy_back(*address, *len);
+                                COPY_BACK[1].fetch_add(written as u64, Ordering::Relaxed);
+                            }
+                        });
                     }
                 });
             }
         }
+        #[cfg(feature = "diagnostics")]
+        crate::copystat::add(crate::copystat::C::CbWallUs, copying.elapsed().as_micros() as u64);
         for list in runs {
             for rb in &list.deferred().readbacks {
                 let written = if rb.dst_pitch == rb.row_bytes && rb.src_pitch == rb.row_bytes {

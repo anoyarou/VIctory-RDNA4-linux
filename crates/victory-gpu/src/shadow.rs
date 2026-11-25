@@ -587,6 +587,10 @@ impl Shadow {
             let mut title: Option<Vec<u8>> = None;
             let mut read: Option<Vec<u8>> = None;
             let mut synced = Vec::new();
+            #[cfg(feature = "diagnostics")]
+            let mut cb = [0u64; 6]; // pieces, differ, compare, read, write (us), after (us)
+            #[cfg(feature = "diagnostics")]
+            crate::copystat::add(crate::copystat::C::CbDeclared, (to - from) as u64);
             let mut at = from;
             while at < to {
                 let n = (PAGE - (start + at) % PAGE).min(to - at);
@@ -594,7 +598,18 @@ impl Shadow {
                 // writes it.
                 let host = unsafe { std::slice::from_raw_parts_mut(self.data.add(at), n) };
                 let old = &before[at - from..at - from + n];
-                if unchanged.differs(start + at, host, old) {
+                #[cfg(feature = "diagnostics")]
+                let t0 = std::time::Instant::now();
+                let differs = unchanged.differs(start + at, host, old);
+                #[cfg(feature = "diagnostics")]
+                {
+                    cb[0] += 1;
+                    cb[1] += u64::from(differs);
+                    cb[2] += t0.elapsed().as_micros() as u64;
+                }
+                if differs {
+                    #[cfg(feature = "diagnostics")]
+                    let t1 = std::time::Instant::now();
                     let buf = title.get_or_insert_with(|| {
                         let mut v = pooled(PAGE);
                         v.resize(PAGE, 0);
@@ -610,6 +625,12 @@ impl Shadow {
                             v
                         });
                         read[..n].copy_from_slice(title_slice);
+                        #[cfg(feature = "diagnostics")]
+                        let t2 = std::time::Instant::now();
+                        #[cfg(feature = "diagnostics")]
+                        {
+                            cb[3] += (t2 - t1).as_micros() as u64;
+                        }
                         // Title memory with the GPU's bytes put in; the copy
                         // takes the title's bytes in turn.
                         if let Some((dirty_start, dirty_end)) =
@@ -640,6 +661,10 @@ impl Shadow {
                                 written += len;
                             }
                         }
+                        #[cfg(feature = "diagnostics")]
+                        {
+                            cb[4] += t2.elapsed().as_micros() as u64;
+                        }
                         synced.push((start + at) / PAGE);
                     }
                 }
@@ -654,6 +679,8 @@ impl Shadow {
             // Pages made equal to title memory are current in the copy, so
             // our own write is not taken for the title's; others keep what
             // they had (a title write there shows at the next refresh).
+            #[cfg(feature = "diagnostics")]
+            let t3 = std::time::Instant::now();
             let (first, last) = ((start + from).div_ceil(PAGE), (start + to) / PAGE);
             if first < last && !synced.is_empty() && mode != NOT_WATCHED {
                 let res = if mode == WATCHED_GUARDED {
@@ -667,6 +694,14 @@ impl Shadow {
                     for page in synced.into_iter().filter(|p| (first..last).contains(p)) {
                         copied[page - base] = now;
                     }
+                }
+            }
+            #[cfg(feature = "diagnostics")]
+            {
+                use crate::copystat::{C, add};
+                cb[5] += t3.elapsed().as_micros() as u64;
+                for (c, v) in [C::CbPieces, C::CbDiffer, C::CbCompareUs, C::CbReadUs, C::CbWriteUs, C::CbAfterUs].into_iter().zip(cb) {
+                    add(c, v);
                 }
             }
         }

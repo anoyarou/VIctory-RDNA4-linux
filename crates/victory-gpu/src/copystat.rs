@@ -62,8 +62,31 @@ pub(crate) enum C {
     FillCopies,
     FillsAdjacent,
     FillsGapped,
+    /// Copy-back of what shaders wrote (`Shadow::copy_back`): bytes
+    /// declared, 64 KiB pieces compared and of those differing, and the time
+    /// of each part: comparing with the snapshot, reading title memory,
+    /// merging and writing back, and marking the pages current afterwards.
+    CbDeclared,
+    CbPieces,
+    CbDiffer,
+    CbCompareUs,
+    CbReadUs,
+    CbWriteUs,
+    CbAfterUs,
+    /// `finish_submission`: groups (host copies) copied back, their summed
+    /// time and the wall time of the copy-backs.
+    CbGroups,
+    CbGroupUs,
+    CbWallUs,
 }
-const COUNTERS: usize = 34;
+const COUNTERS: usize = 44;
+
+/// The longest copy-back group since the last line, in microseconds.
+static CB_LONGEST: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn longest_group(us: u64) {
+    CB_LONGEST.fetch_max(us, Relaxed);
+}
 static COUNT: [AtomicU64; COUNTERS] = [const { AtomicU64::new(0) }; COUNTERS];
 
 pub(crate) fn add(c: C, n: u64) {
@@ -168,6 +191,22 @@ pub(crate) fn log(frames: f64) {
         c[C::FillCopies as usize],
         c[C::FillsAdjacent as usize],
         c[C::FillsGapped as usize],
+    );
+    tracing::info!(
+        "copy-back per frame: {:.2} ms wall over {:.0} groups (summed {:.2} ms, longest since the last line {:.2} ms); \
+         {:.1} MB declared, {:.0} pieces of which {:.0} differ; compare {:.2} ms, read {:.2} ms, merge and write {:.2} ms, \
+         marking current {:.2} ms",
+        ms(c[C::CbWallUs as usize]),
+        c[C::CbGroups as usize],
+        ms(c[C::CbGroupUs as usize]),
+        CB_LONGEST.swap(0, Relaxed) as f64 / 1e3,
+        mb(c[C::CbDeclared as usize]),
+        c[C::CbPieces as usize],
+        c[C::CbDiffer as usize],
+        ms(c[C::CbCompareUs as usize]),
+        ms(c[C::CbReadUs as usize]),
+        ms(c[C::CbWriteUs as usize]),
+        ms(c[C::CbAfterUs as usize]),
     );
     let ranges = RANGES.lock().unwrap_or_else(|e| e.into_inner()).take();
     let mut ranges: Vec<_> = ranges.into_iter().flatten().collect();
