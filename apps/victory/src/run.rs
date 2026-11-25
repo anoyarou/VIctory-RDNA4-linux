@@ -172,6 +172,7 @@ pub fn run(
         println!("not executing (pass --execute to start the title)");
         return Ok(());
     }
+    patch_title(&image, &hash);
     victory_loader::report_crashes();
     victory_loader::log_crashes_to(temp.with_file_name("crashes.log"));
     victory_hle::runtime::use_console_timers();
@@ -195,6 +196,26 @@ pub fn run(
         .map_err(|_| anyhow::anyhow!("title main thread panicked"))??;
     println!("title exited with {code}");
     Ok(())
+}
+
+#[cfg(windows)]
+/// Writes the known build's patches (`victory_game::KnownBuild::patches`)
+/// over the mapped title, unless `VICTORY_KEEP_WATCHDOG=1`.
+fn patch_title(image: &victory_loader::LoadedImage, hash: &str) {
+    let Some(build) = victory_game::identify(hash) else {
+        return;
+    };
+    if std::env::var("VICTORY_KEEP_WATCHDOG").is_ok_and(|v| v == "1") {
+        println!("code patches   none (VICTORY_KEEP_WATCHDOG=1)");
+        return;
+    }
+    let size = image.info().size_of_image as usize;
+    for p in build.patches {
+        match victory_loader::patch_code(image.base(), size, p.rva as usize, p.bytes) {
+            Ok(_) => println!("code patch     +{:#x}: {}", p.rva, p.name),
+            Err(e) => println!("code patch     +{:#x}: {} FAILED: {e:#}", p.rva, p.name),
+        }
+    }
 }
 
 /// The debugging aids (README): scheduled stack dumps, watched values and

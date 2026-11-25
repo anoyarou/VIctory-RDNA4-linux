@@ -23,6 +23,9 @@
 
 #[cfg(windows)]
 mod console_insn;
+#[cfg(windows)]
+mod code_patch;
+#[cfg(windows)]
 mod crash;
 pub mod prepare;
 pub(crate) mod publish;
@@ -42,6 +45,8 @@ pub mod write_sites;
 #[cfg(windows)]
 mod windows;
 
+#[cfg(windows)]
+pub use code_patch::patch_code;
 #[cfg(windows)]
 pub use crash::{
     locate, log_crash, log_crashes_to, note_title_output, report_crashes, report_unhandled,
