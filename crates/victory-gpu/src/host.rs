@@ -2750,6 +2750,11 @@ impl HostList {
                     }
                     let started = std::time::Instant::now();
                     batch.title_written();
+                    #[cfg(feature = "diagnostics")]
+                    {
+                        add(C::CopiesToTitle, 1);
+                        add(C::FlushUs, started.elapsed().as_micros() as u64);
+                    }
                     copy_mapped(dst as *mut u8, src as *const u8, len, true);
                     copy_us += started.elapsed().as_micros() as u64;
                     copy_bytes += len as u64;
@@ -3233,12 +3238,24 @@ pub(crate) fn copy_mapped(dst: *mut u8, src: *const u8, len: usize, title_dst: b
         2 => return,
         _ => {}
     }
-    if len == 0 || title_dst && !crate::texture::committed(dst, len) {
+    if len == 0 {
         return;
     }
     if title_dst {
+        #[cfg(feature = "diagnostics")]
+        let checked = std::time::Instant::now();
+        let committed = crate::texture::committed(dst, len);
+        #[cfg(feature = "diagnostics")]
+        crate::copystat::add(crate::copystat::C::CommittedUs, checked.elapsed().as_micros() as u64);
+        if !committed {
+            return;
+        }
+        #[cfg(feature = "diagnostics")]
+        let opened = std::time::Instant::now();
         // The kernel writes the destination: it must not be guarded.
         crate::watch::writing(dst as usize, len);
+        #[cfg(feature = "diagnostics")]
+        crate::copystat::add(crate::copystat::C::WritingUs, opened.elapsed().as_micros() as u64);
     }
     #[cfg(feature = "diagnostics")]
     let moved = std::time::Instant::now();
@@ -3250,11 +3267,15 @@ pub(crate) fn copy_mapped(dst: *mut u8, src: *const u8, len: usize, title_dst: b
     }
     #[cfg(feature = "diagnostics")]
     crate::copystat::add(crate::copystat::C::Fallbacks, 1);
+    #[cfg(feature = "diagnostics")]
+    let fell = std::time::Instant::now();
     if !title_dst && len >= 64 << 10 {
         read_sparse(src, dst, len);
     } else {
         read_pieces(src, dst, len);
     }
+    #[cfg(feature = "diagnostics")]
+    crate::copystat::add(crate::copystat::C::FallbackUs, fell.elapsed().as_micros() as u64);
 }
 
 /// After a failed bulk read into host memory, skip contiguous holes. Never

@@ -40,8 +40,17 @@ pub(crate) enum C {
     TexWatched,
     TexHashed,
     TexChanged,
+    /// Title copies into title memory (`Step::Copy`; the others fill host
+    /// copies), and the time of each part of them: the pending refreshes
+    /// flushed before one, the check that its destination is committed,
+    /// `watch::writing`, and the page-by-page reads after a failed copy.
+    CopiesToTitle,
+    FlushUs,
+    CommittedUs,
+    WritingUs,
+    FallbackUs,
 }
-const COUNTERS: usize = 23;
+const COUNTERS: usize = 28;
 static COUNT: [AtomicU64; COUNTERS] = [const { AtomicU64::new(0) }; COUNTERS];
 
 pub(crate) fn add(c: C, n: u64) {
@@ -130,6 +139,15 @@ pub(crate) fn log(frames: f64) {
         mb(c[C::TexWatched as usize]),
         mb(c[C::TexHashed as usize]),
         mb(c[C::TexChanged as usize]),
+    );
+    tracing::info!(
+        "copy steps per frame: {:.0} into title memory; flushes before them {:.2} ms, committed checks {:.2} ms, \
+         writing {:.2} ms, fallback reads {:.2} ms",
+        c[C::CopiesToTitle as usize],
+        ms(c[C::FlushUs as usize]),
+        ms(c[C::CommittedUs as usize]),
+        ms(c[C::WritingUs as usize]),
+        ms(c[C::FallbackUs as usize]),
     );
     let ranges = RANGES.lock().unwrap_or_else(|e| e.into_inner()).take();
     let mut ranges: Vec<_> = ranges.into_iter().flatten().collect();
