@@ -660,12 +660,21 @@ fn workers() -> bool {
     })
 }
 
+/// A pipeline worker's stack (see [`spawn_worker`]).
+const PIPELINE_STACK: usize = 64 << 20;
+
 /// Starts one worker: one for passes over the screen alone, or one of the
 /// others.
 fn spawn_worker(screens_only: bool) -> bool {
     let slot = NEXT_SLOT.fetch_add(1, Ordering::Relaxed);
     let spawned = std::thread::Builder::new()
         .name(format!("victory-pipelines-{slot}"))
+        // The host's compiler runs on this thread. Under Wine, vkd3d-proton's
+        // shader compiler overflowed Rust's default 2 MiB here on six of this
+        // tree's pipelines in every run (RX 9070 XT, runs 33-36): the workers
+        // died inside the compile and their pipelines were never made. Only
+        // reserved; pages are committed as the stack grows.
+        .stack_size(PIPELINE_STACK)
         .spawn(move || {
             WORKER_SLOT.set(slot);
             // Below the title's own threads (loading, recording),
