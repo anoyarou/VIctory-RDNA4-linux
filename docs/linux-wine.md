@@ -65,6 +65,23 @@ showed ~215 ms between the title's submissions. With dxil-spirv `b540c8a2` (run 
 pipelines, 3.4 ms between submissions, ~64 ms a frame; preparing (~57 ms) is what is left. Beqren saw
 the same on avatarmanz/VIctory-7900XTX#111; `VICTORY_PIPELINE_WAIT_MS=0` hides it without the fix.
 
+## Merged from avatarmanz/VIctory-7900XTX `main` (`aad5ed5`, branch `rx9070xt-wine-am`; untested here)
+
+avatarmanz `main` up to `a9400a6`, 161 commits. Switches worth trying under Wine, all off by default
+unless noted:
+
+- `VICTORY_PORT_GUARD=1` (renderer port 6, `cc761bf`): faults and refreshes share the guards' lock,
+  view memory is not asked of the kernel. In run 43 the threads waited 64 ms a frame for the guards and
+  spent 25 ms changing protections; reported on Windows: guard waits 29 -> ~2 ms, frame 47.2 -> 45.1 ms.
+- `VICTORY_PORT_CBV=1` (renderer port 5, `0dec5dc`): constant buffers read in place, ~22,000 fills a
+  frame fewer (reported). Not `VICTORY_PORT_CONSTANTS=1`: black world frames on RADV
+  (avatarmanz/VIctory-7900XTX#163).
+- `VICTORY_PLANES` (two-plane compose, `85a663d`, `0ce46d5`), **on by default** there: maybe the logo
+  videos' jumping (a guess; nothing upstream says so).
+
+Not taken: Marvisak/VIctory#3069 and #3199 (copy-back through a view of our own): this base already
+lands beside the guards (`VICTORY_LAND_BESIDE`, on; 764 of 1,319 pieces a frame in run 43).
+
 ## Ported from `speed-trial`
 
 | Commit there | Here | What |
