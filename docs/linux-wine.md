@@ -3,7 +3,7 @@
 This branch, `rx9070xt-wine`, is Belobug/VIctory-Belobug-AMD's `rx9070xt` branch (the RX 7900 XTX
 fork, avatarmanz/VIctory-7900XTX, plus Belobug `81ebb7b` for the RX 9070 XT) with what our Wine runs
 needed ported from our earlier branch `speed-trial` (on Belobug `main`). That branch's
-`docs/linux-wine.md` has the measurements of 32 runs. On this branch, runs 33-40 (RX 9070 XT, RADV,
+`docs/linux-wine.md` has the measurements of 32 runs. On this branch, runs 33-43 (RX 9070 XT, RADV,
 Proton Experimental `experimental-11.0-20261112`, from a save, standing still in the first playable
 area) [measured on one machine].
 
@@ -40,13 +40,19 @@ area) [measured on one machine].
   others listed there. Standing still: **575 ms a frame with this fork's defaults (run 33), 290-301 ms
   with these (runs 34-36)**, while the times the frame line gives for our own work hardly changed.
   Likely `VICTORY_THIN`, which takes the list calls off the title's threads (not tested alone).
+- **`VICTORY_FETCH_CHECK=1` with `VICTORY_RELAY=2`** (avatarmanz/VIctory-7900XTX#13, #138; #148 makes it
+  the default there). Without it the characters' skin looked oily or flat and the eyes wrong (runs
+  40-42): with `RELAY=2` a few fetched pieces of GPU copies are torn. In run 43 the check found 3-5
+  of ~970 a frame and fetched them again; skin right, no measurable cost. `RELAY=1` also fixes the
+  skin but cost ~25 ms a frame (run 41). `VICTORY_LAND_ECHO=0` (avatarmanz/VIctory-7900XTX#201, for
+  missing skin in #59) did not help here and sends GPU-written pages up again (run 42).
 
 ## Changes on this branch
 
 | Commit | What |
 |---|---|
 | `76f8581` | `VICTORY_AMBIENT=<share>,floor:<level>`: the ambient stand-in's estimate, never below beloooo's constant. Indoors without rays the estimate feeds on itself (dark walls send out little), and a room stayed too dark at `0.8`. Used as `0.8,floor:0.6`; no measurable frame cost. |
-| `fa54da3` | avatarmanz/VIctory-7900XTX#200 (`1b06b56`, amine23012004, after Kayotic1337 and zocram4cc on avatarmanz/VIctory-7900XTX#59): Wine refuses `NtQueryVirtualMemory` class 7, so no hole was ever known and each was asked about with `VirtualQuery` every frame (13,000-23,000 calls, reported). A private, reserved, `PAGE_NOACCESS` block now counts as a placeholder there. Reported: preparing 38-42 -> 24-28 ms on an RX 9070 XT. Untested here. |
+| `fa54da3` | avatarmanz/VIctory-7900XTX#200 (`1b06b56`, amine23012004, after Kayotic1337 and zocram4cc on avatarmanz/VIctory-7900XTX#59): Wine refuses `NtQueryVirtualMemory` class 7, so no hole was ever known and each was asked about with `VirtualQuery` every frame (13,000-23,000 calls, reported). A private, reserved, `PAGE_NOACCESS` block now counts as a placeholder there. Reported: preparing 38-42 -> 24-28 ms on an RX 9070 XT. Here (run 43, with `FETCH_CHECK=1`, at the bunk, ~3,600 draws): **61-64 ms a frame (16 fps)**, against run 40's 64-68 ms at ~3,150 draws; write-watch asking 27-30 ms a frame against up to 78 ms. |
 
 ## Where the frame went (runs 34-37), and why it is gone
 
