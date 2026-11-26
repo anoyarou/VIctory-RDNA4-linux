@@ -65,7 +65,7 @@ showed ~215 ms between the title's submissions. With dxil-spirv `b540c8a2` (run 
 pipelines, 3.4 ms between submissions, ~64 ms a frame; preparing (~57 ms) is what is left. Beqren saw
 the same on avatarmanz/VIctory-7900XTX#111; `VICTORY_PIPELINE_WAIT_MS=0` hides it without the fix.
 
-## Merged from avatarmanz/VIctory-7900XTX `main` (`aad5ed5`, branch `rx9070xt-wine-am`; untested here)
+## Merged from avatarmanz/VIctory-7900XTX `main` (`aad5ed5`, branch `rx9070xt-wine-am`; run 44)
 
 avatarmanz `main` up to `a9400a6`, 161 commits. Switches worth trying under Wine, all off by default
 unless noted:
@@ -73,11 +73,15 @@ unless noted:
 - `VICTORY_PORT_GUARD=1` (renderer port 6, `cc761bf`): faults and refreshes share the guards' lock,
   view memory is not asked of the kernel. In run 43 the threads waited 64 ms a frame for the guards and
   spent 25 ms changing protections; reported on Windows: guard waits 29 -> ~2 ms, frame 47.2 -> 45.1 ms.
+  **Run 44** (at the bunk, ~3,540 draws): guard waits 64 -> 0.2 ms and kernel askings 34 -> 4.9 ms a
+  frame, but the frame only 61-64 -> 59-61 ms: those waits were mostly off the frame's critical path.
+  New in run 44: the inmates' uniforms look plastic; not yet known whether port 6 or another commit
+  of the merge does it.
 - `VICTORY_PORT_CBV=1` (renderer port 5, `0dec5dc`): constant buffers read in place, ~22,000 fills a
   frame fewer (reported). Not `VICTORY_PORT_CONSTANTS=1`: black world frames on RADV
   (avatarmanz/VIctory-7900XTX#163).
-- `VICTORY_PLANES` (two-plane compose, `85a663d`, `0ce46d5`), **on by default** there: maybe the logo
-  videos' jumping (a guess; nothing upstream says so).
+- `VICTORY_PLANES` (two-plane compose, `85a663d`, `0ce46d5`), on by default there. It does **not** stop
+  the logo videos jumping (run 44).
 
 Not taken: Marvisak/VIctory#3069 and #3199 (copy-back through a view of our own): this base already
 lands beside the guards (`VICTORY_LAND_BESIDE`, on; 764 of 1,319 pieces a frame in run 43).
