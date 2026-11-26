@@ -27,6 +27,10 @@
 //! - unset or `0`/`off`: the title's own output.
 //! - a number: that share of the estimate (1: all of it).
 //! - `constant:<level>`: the constant, as beloooo's fork has it.
+//! - `<share>,floor:<level>`: the estimate, never below that constant. Indoors
+//!   with no rays the estimate feeds on itself (dark walls send out little,
+//!   so the light stays dark: a café too dark under Wine, run 34); the floor
+//!   is the constant's least light everywhere (Belobug `main`'s 0.6).
 //!
 //! `VICTORY_AMBIENT_SHADE=<strength>,<radius in metres>` sets the creases.
 //!
@@ -81,11 +85,20 @@ enum Set {
     Off,
     Estimate(f32),
     Constant(f32),
+    /// The estimate's share, and the constant it does not go below.
+    Floored(f32, f32),
 }
 
 fn parse(set: &str) -> Set {
     let set = set.trim();
     let number = |t: &str| t.trim().parse::<f32>().ok().filter(|v| v.is_finite() && *v > 0.0);
+    if let Some((share, floor)) = set.split_once(",floor:") {
+        return match (number(share), number(floor)) {
+            (Some(share), Some(floor)) => Set::Floored(share, floor),
+            (Some(share), None) => Set::Estimate(share),
+            _ => Set::Off,
+        };
+    }
     match set.strip_prefix("constant:") {
         Some(level) => number(level).map_or(Set::Off, Set::Constant),
         None => number(set).map_or(Set::Off, Set::Estimate),
@@ -293,7 +306,7 @@ void raise(uint3 at : SV_DispatchThreadID) {
         open = saturate(1.0 - strength * 2.0 * sum / N);
     }
     float3 found;
-    if (constant > 0.0) {
+    if (level == 0.0) {
         found = float3(1.0, 0.98, 0.94) * constant * open;
         light[p] = pack(found);
         return;
@@ -320,6 +333,8 @@ void raise(uint3 at : SV_DispatchThreadID) {
     found = all + 1.2 * float3(dot(sr.xyz, n), dot(sg.xyz, n), dot(sb.xyz, n)) / sum;
     found = clamp(found, 0.2 * all, 2.5 * all);
     found = lerp(found, cells[CELLS].rgb, 0.2) * level * open;
+    // `,floor:`: never below the constant (0 without it).
+    found = max(found, float3(1.0, 0.98, 0.94) * constant * open);
     float3 was = unpack(light[p]);
     // Magenta (green far below red and blue) is what the probes' memory held, not light.
     if (was.g < 0.5 * min(was.r, was.b) && max(was.r, was.b) > 0.02) was = 0.0;
@@ -435,11 +450,13 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
         Set::Off => return false,
         Set::Estimate(level) => (level, 0.0f32),
         Set::Constant(level) => (0.0, level),
+        Set::Floored(level, floor) => (level, floor),
     };
-    if role != Role::Radiance && constant == 0.0 && !KEPT.load(Ordering::Relaxed) {
+    // The estimate needs the light kept from the frame before.
+    if role != Role::Radiance && level > 0.0 && !KEPT.load(Ordering::Relaxed) {
         return false;
     }
-    if role == Role::Air && (constant > 0.0 || air() == 0.0) {
+    if role == Role::Air && (level == 0.0 || air() == 0.0) {
         return false;
     }
     static SAID: Mutex<u32> = Mutex::new(0);
@@ -488,7 +505,7 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
             }
             Role::Air => run(&pass.air, views.size[0].div_ceil(8), views.size[1].div_ceil(8), views.slices.div_ceil(2)),
             Role::Resolve => {
-                if constant == 0.0 {
+                if level > 0.0 {
                     run(&pass.place, 8, 9, 1);
                     run(&pass.gather, 20, 45, 1);
                 }
@@ -511,6 +528,9 @@ mod tests {
         assert_eq!(parse("0.8"), Set::Estimate(0.8));
         assert_eq!(parse("constant:0.3"), Set::Constant(0.3));
         assert_eq!(parse("constant:nan"), Set::Off);
+        assert_eq!(parse("0.8,floor:0.4"), Set::Floored(0.8, 0.4));
+        assert_eq!(parse("0.8,floor:x"), Set::Estimate(0.8));
+        assert_eq!(parse("x,floor:0.4"), Set::Off);
     }
 
     #[test]
