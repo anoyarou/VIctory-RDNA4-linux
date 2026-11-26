@@ -29,8 +29,9 @@ pub mod structure;
 /// (0x4c00_0001 and up: the Linux tree's, with #927's half views and the
 /// raw typed loads; 0x4c00_0003 adds avatarmanz/VIctory-7900XTX#353's early
 /// depth test, 0x4c00_0004 #354's killed lanes going on with their quad.
-/// Upstream's own numbers stay below.)
-pub const TRANSLATOR_VERSION: u32 = 0x4c00_0004;
+/// 0x4c00_0005 Belobug a-publier's version 2: a size query is not reused,
+/// Belobug/VIctory-Belobug-AMD#324. Upstream's own numbers stay below.)
+pub const TRANSLATOR_VERSION: u32 = 0x4c00_0005;
 
 pub use dxbc::{Container, FourCC, Part};
 pub use dxil::{DxilProgram, ShaderKind, XboxExtras};
