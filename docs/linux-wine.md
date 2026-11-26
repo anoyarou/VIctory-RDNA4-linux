@@ -47,15 +47,15 @@ area) [measured on one machine].
 |---|---|
 | `76f8581` | `VICTORY_AMBIENT=<share>,floor:<level>`: the ambient stand-in's estimate, never below beloooo's constant. Indoors without rays the estimate feeds on itself (dark walls send out little), and a room stayed too dark at `0.8`. Used as `0.8,floor:0.6`; no measurable frame cost. |
 
-## Where the frame goes (runs 35-36)
+## Where the frame went (runs 34-37), and why it is gone
 
-One title thread is at ~93% of a core, but it waits: ~55% in `mwaitx` on a 64-bit counter (image
-`+0x4fb0bd0`, called near the title's frame limiter of Marvisak/VIctory#2469), ~33% in the `Sleep(0)`
-between waits, which Proton's `NtDelayExecution` turns into `getrusage` and `sched_yield`. Stack dumps
-(`VICTORY_STACKS`) show the other title threads in kernel waits and our submitting thread idle. The
-frame line: 17 title submissions a frame with ~215 ms of the frame between them. Hypothesis: the
-frame is a series of round trips (submission, card, copy back, the counter), bound by their latency
-rather than by any thread's work [stacks and counters measured; the cause not proven].
+Standing still at ~290 ms a frame, every frame line said `500.0 ms waiting for pipelines` and
+`(6 being made)`: the layer's per-frame pipeline wait (`VICTORY_PIPELINE_WAIT_MS`) was spent on the six
+pipelines above, which never arrive. Meanwhile one title thread polled a counter (`mwaitx` and
+`Sleep(0)`, image `+0x4fb0bd0`, near the frame limiter of Marvisak/VIctory#2469) and the frame line
+showed ~215 ms between the title's submissions. With dxil-spirv `b540c8a2` (run 40): 0 ms waiting for
+pipelines, 3.4 ms between submissions, ~64 ms a frame; preparing (~57 ms) is what is left. Beqren saw
+the same on avatarmanz/VIctory-7900XTX#111; `VICTORY_PIPELINE_WAIT_MS=0` hides it without the fix.
 
 ## Ported from `speed-trial`
 
