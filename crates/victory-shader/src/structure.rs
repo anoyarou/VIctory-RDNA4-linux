@@ -467,10 +467,14 @@ thread_local! {
 /// they went on: for a program that goes on to a lane test the lowering cannot make (a
 /// constant lane mask) and translated that way.
 pub fn without_live_quads<T>(f: impl FnOnce() -> T) -> T {
-    let was = LIVE_QUADS.replace(false);
-    let r = f();
-    LIVE_QUADS.set(was);
-    r
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            LIVE_QUADS.set(self.0);
+        }
+    }
+    let _restore = Restore(LIVE_QUADS.replace(false));
+    f()
 }
 
 /// Builds the per-lane form of `program`.
@@ -1725,6 +1729,18 @@ mod tests {
             .expect("the select");
         let mask = select.write(Reg::S(3)).unwrap();
         assert_eq!(s.masks.get(&mask), Some(&Bool::FALSE));
+    }
+
+    #[test]
+    fn a_panicking_retry_restores_live_quads() {
+        let failed_retry = || std::panic::catch_unwind(|| without_live_quads(|| panic!("test retry")));
+        assert!(LIVE_QUADS.get());
+        without_live_quads(|| {
+            assert!(failed_retry().is_err());
+            assert!(!LIVE_QUADS.get());
+        });
+        assert!(failed_retry().is_err());
+        assert!(LIVE_QUADS.get());
     }
 
     #[test]
