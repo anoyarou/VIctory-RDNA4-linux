@@ -28,8 +28,9 @@ pub mod structure;
 /// how many came out different: if any did, the bump was due.
 /// (0x4c00_0001 and up: the Linux tree's, with #927's half views and the
 /// raw typed loads; 0x4c00_0003 adds avatarmanz/VIctory-7900XTX#353's early
-/// depth test. Upstream's own numbers stay below.)
-pub const TRANSLATOR_VERSION: u32 = 0x4c00_0003;
+/// depth test, 0x4c00_0004 #354's killed lanes going on with their quad.
+/// Upstream's own numbers stay below.)
+pub const TRANSLATOR_VERSION: u32 = 0x4c00_0004;
 
 pub use dxbc::{Container, FourCC, Part};
 pub use dxil::{DxilProgram, ShaderKind, XboxExtras};
