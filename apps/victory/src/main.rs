@@ -4,6 +4,7 @@
 //! the user's cache directory (outside the repository).
 
 mod census;
+mod glyphs;
 mod inspect;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod replay;
@@ -163,6 +164,22 @@ enum Command {
     /// docs/replay.md).
     #[cfg(all(windows, feature = "diagnostics"))]
     Replay(replay::Replay),
+    /// PlayStation button prompts (and with --xelu the Settings controller
+    /// picture) built from your copy of the game, written as a
+    /// VICTORY_FILE_PATCH list into the cache folder. Prompt symbols: Kenney's
+    /// Input Prompts (CC0); picture: Xelu's Free Controller & Key Prompts
+    /// (CC0, thoseawesomeguys.com/prompts), which you download.
+    Glyphs {
+        /// The game folder (default: the configured one).
+        #[arg(long)]
+        game: Option<PathBuf>,
+        /// The folder with Xelu's PS5_Diagram.png and PS5_Diagram_Simple.png.
+        #[arg(long)]
+        xelu: Option<PathBuf>,
+        /// Where to write (default: <cache>/file-patches/playstation).
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Show the resolved configuration and check it.
     Config,
 }
@@ -242,6 +259,7 @@ fn main() -> Result<()> {
         }
         #[cfg(all(windows, feature = "diagnostics"))]
         Command::Replay(options) => replay::run(options),
+        Command::Glyphs { game, xelu, out } => glyphs::run(game, xelu, out),
         Command::Config => show_config(),
     }
 }

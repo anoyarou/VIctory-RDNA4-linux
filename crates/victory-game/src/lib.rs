@@ -3,6 +3,8 @@
 //! offsets or byte-pattern signatures). What may and may not be stored here
 //! is defined in docs/asset-policy.md.
 
+pub mod prompt_glyphs;
+pub mod settings_diagram;
 pub mod sgd5;
 
 /// A specific build of the title executable we know how to run.
