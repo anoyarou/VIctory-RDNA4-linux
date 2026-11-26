@@ -75,13 +75,33 @@ unless noted:
   spent 25 ms changing protections; reported on Windows: guard waits 29 -> ~2 ms, frame 47.2 -> 45.1 ms.
   **Run 44** (at the bunk, ~3,540 draws): guard waits 64 -> 0.2 ms and kernel askings 34 -> 4.9 ms a
   frame, but the frame only 61-64 -> 59-61 ms: those waits were mostly off the frame's critical path.
-  New in run 44: the inmates' uniforms look plastic; not yet known whether port 6 or another commit
-  of the merge does it.
+  New in run 44: the inmates' uniforms look plastic. In run 45 (port 6 off, `AMBIENT_SETTLE` on as
+  before) they look normal, so most likely port 6 (not proven: run 45 also merged Belobug's branch).
+  avatarmanz/VIctory-7900XTX#270 measured port 6 slower under Wine. **Leave it off.** Also leave
+  renderer port 7 (`VICTORY_PORT_JOURNAL`) off: waxy skin under Proton there.
 - `VICTORY_PORT_CBV=1` (renderer port 5, `0dec5dc`): constant buffers read in place, ~22,000 fills a
   frame fewer (reported). Not `VICTORY_PORT_CONSTANTS=1`: black world frames on RADV
   (avatarmanz/VIctory-7900XTX#163).
 - `VICTORY_PLANES` (two-plane compose, `85a663d`, `0ce46d5`), on by default there. It does **not** stop
   the logo videos jumping (run 44).
+
+## Merged from Belobug/VIctory-Belobug-AMD `rx9070xt` (`ba3cc52`, branch `rx9070xt-wine-am`; run 45)
+
+Belobug rebuilt `rx9070xt` (`a-publier` is the same commit, `cd8dfc0`) on avatarmanz `main` `c9c932c`
+(renderer port 7, off) with three commits: `e942896` (the RX 9070 XT fixes and the HUD on that base,
+VRAM keep thresholds 85/93 %), `5d6bd84` (changed title textures uploaded on the submitting list's
+prelude, not a frame late; Belobug/VIctory-Belobug-AMD#279) and `cd8dfc0` (PC FSR 4.1.2 to 4K,
+`VICTORY_FSR_4K`, from DexNom/VIctory `ab34a8b2`; not tried: it asks for a 4.1.2 provider).
+
+**Run 45**, with `RADV_EXPERIMENTAL=transfer_queue` (vkd3d-proton's copy queue on SDMA,
+avatarmanz/VIctory-7900XTX#111) and port 6 off [measured on one machine, user's eyes for the picture]:
+- the intro logo videos no longer jump (likely `5d6bd84`); uniforms and skin right;
+- at the bunk at ~2,400-3,300 draws **57-62 ms a frame**, preparing 50-53, **copy-back 24-27 ms**
+  (run 44: 38-39; `transfer_queue` and the merge not separated); draws in view vary much more than
+  before (up to ~11,400; 72-75 ms at ~7,000);
+- dropped ~330 draws a frame without a host pipeline: expected with the ray-tracing builder off
+  (Belobug/VIctory-Belobug-AMD#269);
+- game process up to 15.6 GB resident.
 
 Not taken: Marvisak/VIctory#3069 and #3199 (copy-back through a view of our own): this base already
 lands beside the guards (`VICTORY_LAND_BESIDE`, on; 764 of 1,319 pieces a frame in run 43).
@@ -117,5 +137,9 @@ there because it starts `cargo` from inside Wine (`Invalid handle`), not because
 up), so the ambient change was checked in the game (its shader compiled and ran) rather than by
 `ambient::tests`.
 
-Open: the logo videos jump back and forth since this base (runs 33 on; not on `speed-trial`, which
-had Belobug's uncapped frame pacing `fa07481`); not looked into yet.
+Fixed in run 45: the logo videos jumped back and forth since this base (runs 33-44); gone with Belobug
+`5d6bd84` (see above).
+
+Open: mouths stay shut in dialogue (all runs). avatarmanz/VIctory-7900XTX#114 makes the face network
+compute (its `_d16` accesses through table views); on Radeon under Proton the comments there report it
+needs fxceless/victory-fork#927's half views and the raw typed loads too (avatarmanz/VIctory-7900XTX#231).
