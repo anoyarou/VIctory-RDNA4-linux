@@ -140,6 +140,9 @@ up), so the ambient change was checked in the game (its shader compiled and ran)
 Fixed in run 45: the logo videos jumped back and forth since this base (runs 33-44); gone with Belobug
 `5d6bd84` (see above).
 
-Open: mouths stay shut in dialogue (all runs). avatarmanz/VIctory-7900XTX#114 makes the face network
-compute (its `_d16` accesses through table views); on Radeon under Proton the comments there report it
-needs fxceless/victory-fork#927's half views and the raw typed loads too (avatarmanz/VIctory-7900XTX#231).
+Fixed in run 46: mouths stayed shut in dialogue (runs 33-45). `9274523` brings avatarmanz/VIctory-7900XTX#114
+(the face network's `_d16` accesses through table views), fxceless/victory-fork#927's half views and
+Beqren's raw typed loads (`1711cd1c2`, `VICTORY_RAW_TYPED_LOADS`, on), as bordersky/victory-linux
+carries them; on Radeon under Proton #114 alone tears the mouths (Fedalv, comments on #114). Mouths
+move [user]; at the bunk at ~7,000 draws 72.5-76 ms a frame against run 45's 72-75 ms [measured]. The
+first run translates every shader again (new `TRANSLATOR_VERSION`): ~90 s of slow frames.
