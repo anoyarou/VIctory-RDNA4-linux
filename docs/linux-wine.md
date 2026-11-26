@@ -131,8 +131,10 @@ picture right; the user found the picture better and the frame rate worse. From 
 mission done), standing at the aquarium at ~8,000 draws: **164 ms a frame** (120-216), preparing 116,
 GPU ~1, copy-back 26, texture refreshes 130 ms a frame over all threads; game process up to 16.4 GiB
 resident, 2.6-3.1 GiB of swap used by then, so memory pressure may be part of it. Not compared at the
-same spot with an earlier build; the planned A/B is `VICTORY_LIVE_TEXTURES=0` (#390 off) at the
-aquarium. Untested: TV/phone video.
+same spot with an earlier build. Run 57 (like runs 52-56) ran on stock Proton Experimental, not the
+view-tree wineserver of the setup above, so its frame time is not comparable with run 45's; the
+next runs repeat the aquarium on the view-tree wineserver, then with `VICTORY_LIVE_TEXTURES=0`
+(#390 off). Untested: TV/phone video.
 
 ## Ported from `speed-trial`
 
