@@ -106,6 +106,34 @@ avatarmanz/VIctory-7900XTX#111) and port 6 off [measured on one machine, user's 
 Not taken: Marvisak/VIctory#3069 and #3199 (copy-back through a view of our own): this base already
 lands beside the guards (`VICTORY_LAND_BESIDE`, on; 764 of 1,319 pieces a frame in run 43).
 
+## Picked up 2026-11-27 (`cacc825`; run 57)
+
+`rx9070xt-wine` is again the one branch: it was fast-forwarded to the former trial branch
+`rx9070xt-wine-am`, which only added commits on top of it.
+- Serph91P/VIctory-7900XTX@75f6b933: live-quad handling restored when a translation retry
+  unwinds (fix-up for avatarmanz/VIctory-7900XTX#354, which this branch carries).
+- avatarmanz/VIctory-7900XTX#390 (`a89d3921`): textures the title rewrites in place (TV and phone
+  video) looked at every frame, fingerprinted whole; `VICTORY_LIVE_TEXTURES=0` turns it off.
+- The save part of Belobug/VIctory-Belobug-AMD@705a2d09: an older save version that cannot be removed
+  no longer hides the newest one.
+- Belobug/VIctory-Belobug-AMD `a-publier` `4eb6cfd` merged (49 commits since `cd8dfc0`): among them #324
+  (a size query is not reused; AMD's compiler crashed on 29 compute pipelines on RDNA4), #354 (port 2
+  sync), #343 (`VICTORY_PROFILE` no longer crashes), #336 (FSR 3.1 fallback for `-Fsr4K`). Translator
+  version `0x4c00_0005`.
+
+Not taken: Belobug `main`'s sky-following ambient (`705a2d09`, `e48eb83e`, `4f62c2a5`, `c3bd5612`) builds
+on sky-finding code this branch's ambient stand-in (avatarmanz's estimate) does not have; its plan
+rebuild change has no counterpart here. avatarmanz's `VICTORY_PORT_CONSTANTS_ORDER` works only with
+renderer port 1 (off here).
+
+**Run 57** [measured on one machine, user's eyes for the picture]: PlayStation prompts and Settings
+picture right; the user found the picture better and the frame rate worse. From a new save (the first
+mission done), standing at the aquarium at ~8,000 draws: **164 ms a frame** (120-216), preparing 116,
+GPU ~1, copy-back 26, texture refreshes 130 ms a frame over all threads; game process up to 16.4 GiB
+resident, 2.6-3.1 GiB of swap used by then, so memory pressure may be part of it. Not compared at the
+same spot with an earlier build; the planned A/B is `VICTORY_LIVE_TEXTURES=0` (#390 off) at the
+aquarium. Untested: TV/phone video.
+
 ## Ported from `speed-trial`
 
 | Commit there | Here | What |
