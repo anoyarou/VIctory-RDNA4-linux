@@ -2,7 +2,8 @@
 
 This branch, `rx9070xt-wine`, is Belobug/VIctory-Belobug-AMD's `rx9070xt` branch (the RX 7900 XTX
 fork, avatarmanz/VIctory-7900XTX, plus Belobug `81ebb7b` for the RX 9070 XT) with what our Wine runs
-needed ported from our earlier branch `speed-trial` (on Belobug `main`). That branch's
+needed ported from our earlier branch `speed-trial` (on Belobug `main`; archived as the tag
+`archive/speed-trial`, where every `speed-trial` commit named below can be found). That tag's
 `docs/linux-wine.md` has the measurements of 32 runs. On this branch, runs 33-43 (RX 9070 XT, RADV,
 Proton Experimental `experimental-11.0-20261112`, from a save, standing still in the first playable
 area) [measured on one machine].
