@@ -133,8 +133,9 @@ GPU ~1, copy-back 26, texture refreshes 130 ms a frame over all threads; game pr
 resident, 2.6-3.1 GiB of swap used by then, so memory pressure may be part of it. Not compared at the
 same spot with an earlier build. Run 57 (like runs 52-56) ran on stock Proton Experimental, not the
 view-tree wineserver of the setup above, so its frame time is not comparable with run 45's; the
-next runs repeat the aquarium on the view-tree wineserver, then with `VICTORY_LIVE_TEXTURES=0`
-(#390 off). Untested: TV/phone video.
+same spot (a snake terrarium) on the view-tree wineserver, **run 58: 81 ms a frame** (72-91) at
+~7,800 draws, preparing 66, copy-back 28, texture refreshes 24 ms a frame: in line with run 45's
+72-75 ms at ~7,000 draws. The new commits, #390 included, cost nothing visible here. Untested: TV/phone video.
 
 ## Ported from `speed-trial`
 
