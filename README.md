@@ -5,7 +5,7 @@ that runs an Xbox Series title on a PC from files the user supplies. This one is
 about running it **on Linux under Wine/Proton, on an AMD RDNA 4 card**. Its base is
 [avatarmanz/VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX) (speed on
 RDNA 3, Windows) with [Belobug](https://github.com/Belobug/VIctory-Belobug-AMD)'s
-RX 9070 XT fixes (`rx9070xt` branch), plus what the Wine runs here needed, taken
+RX 9070 XT fixes (`rx9070xt` branch, `cd8dfc0`), plus what the Wine runs here needed, taken
 from those repositories, from Marvisak/VIctory and from our own measurements. It
 is playable, slowly.
 
@@ -30,17 +30,20 @@ Tested on one machine only:
 
 | | |
 |---|---|
-| Standing in the first playable area (~3,600 draws) | 61-64 ms a frame (16 fps) |
-| Busier views (~9,000 draws) | 78-92 ms (11-13 fps) |
-| Memory | game process 13.6-15.6 GB resident; 32 GB with swap was enough |
+| Standing in the first playable area (~2,400-3,300 draws) | 57-62 ms a frame (16-17.5 fps) |
+| The same place, more in view (~7,000 draws) | 72-76 ms (13-14 fps) |
+| Memory | game process 14-16 GB resident; 32 GB with swap was enough |
+
+Faces move (mouths, brows, blinks), skin and clothes look right, and the logo
+videos play smoothly.
 
 It started at ~575 ms a frame on this base (2 fps). What brought it down, run by
 run, is in [docs/linux-wine.md](docs/linux-wine.md).
 
 What is known to be wrong here:
 
-- About 340 draws a frame are dropped without a host pipeline.
-- The logo videos at the start jump back and forth.
+- About 330 draws a frame are dropped without a host pipeline: the ray-tracing
+  builder's, which is off (Belobug/VIctory-Belobug-AMD#269).
 - Lighting indoors is only approximate without ray tracing (an ambient stand-in).
 - Loading the world takes more than 40 s.
 
@@ -61,13 +64,16 @@ Then, with a Wine prefix of Proton's:
 - `WINEDLLOVERRIDES="d3d12,d3d12core,dxgi,d3d11,d3d10core=n,b;d3dcompiler_47=n"`, and a
   64-bit Microsoft `d3dcompiler_47.dll` next to `victory.exe`.
 - `VKD3D_CONFIG=ignore_shared_fence,descriptor_heap` (needs Resizable BAR).
+- `RADV_EXPERIMENTAL=transfer_queue`: copies on the SDMA queue, copy-back ~38 -> 24-27 ms
+  (avatarmanz/VIctory-7900XTX#111).
 - **A vkd3d-proton with dxil-spirv `694cc674` or later** (vkd3d-proton master
   `71cae09` has it). With older ones six shadow pipelines are never made and each
   frame waits 500 ms for them. Rebuilt `d3d12core.dll` next to `victory.exe` works
   without touching Proton or the prefix.
 - A wineserver with the view-tree patch, or loading the world is far slower.
 - The settings of `scripts/play.ps1` (not `-Safe`) as environment variables, plus
-  `VICTORY_FETCH_CHECK=1` (without it the characters' skin looks wrong).
+  `VICTORY_FETCH_CHECK=1` (without it the characters' skin looks wrong). Leave
+  `VICTORY_PORT_GUARD` and `VICTORY_PORT_JOURNAL` off (clothes look plastic, skin waxy).
 - `wine victory.exe run <your copy's executable> --execute --console series-x`.
 
 All of it, with the reasons and the measurements, is in
@@ -110,9 +116,14 @@ commits taken from elsewhere name the commit and its author.
   the base of this branch, and the pull requests and reports of the people testing
   it under Linux (avatarmanz/VIctory-7900XTX#13, avatarmanz/VIctory-7900XTX#59,
   avatarmanz/VIctory-7900XTX#111, avatarmanz/VIctory-7900XTX#148,
-  avatarmanz/VIctory-7900XTX#166, avatarmanz/VIctory-7900XTX#200 and others).
+  avatarmanz/VIctory-7900XTX#166, avatarmanz/VIctory-7900XTX#200 and others), and
+  the face fix of avatarmanz/VIctory-7900XTX#114 with Beqren's raw typed loads.
 - **beloooo ([Belobug/VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD))**:
-  the RX 9070 XT fixes of the `rx9070xt` branch (`81ebb7b`).
+  the RX 9070 XT fixes and HUD of the `rx9070xt` branch (`81ebb7b`, `e942896`),
+  texture uploads in the prelude (`5d6bd84`) and the FSR 4.1.2 bridge (`cd8dfc0`).
+- **tippythetaidum (fxceless/victory-fork#927)**: the half views that make faces
+  right on Radeon; **bordersky/victory-linux** and **Fedalv** for carrying and
+  testing the three face pieces together under Linux.
 - **[HansKristian-Work/dxil-spirv](https://github.com/HansKristian-Work/dxil-spirv)**
   and **vkd3d-proton**: the dxil-spirv fix (`694cc674`) the shadow pipelines need.
 - **[fxceless/victory-fork](https://github.com/fxceless/victory-fork)**: the fork the RX 7900 XTX base
