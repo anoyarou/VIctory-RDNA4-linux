@@ -3,9 +3,11 @@
 This branch, `rx9070xt-wine`, is Belobug/VIctory-Belobug-AMD's `rx9070xt` branch (the RX 7900 XTX
 fork, avatarmanz/VIctory-7900XTX, plus Belobug `81ebb7b` for the RX 9070 XT) with what our Wine runs
 needed ported from our earlier branch `speed-trial` (on Belobug `main`). That branch's
-`docs/linux-wine.md` has the measurements of 32 runs; this one is **untested under Wine** so far.
+`docs/linux-wine.md` has the measurements of 32 runs. On this branch, runs 33-40 (RX 9070 XT, RADV,
+Proton Experimental `experimental-11.0-20261112`, from a save, standing still in the first playable
+area) [measured on one machine].
 
-## Setup (carried over from `speed-trial`, not yet verified on this branch)
+## Setup (verified on this branch unless marked)
 
 - **Native Direct3D 12 and Microsoft's compiler:**
   `WINEDLLOVERRIDES="d3d12,d3d12core,dxgi,d3d11,d3d10core=n,b;d3dcompiler_47=n"`, a 64-bit
@@ -17,7 +19,43 @@ needed ported from our earlier branch `speed-trial` (on Belobug `main`). That br
   see Marvisak/VIctory#834.
 - **Building from Linux:** `cargo xwin build --profile diag --target x86_64-pc-windows-msvc -p victory --features victory/diagnostics`.
 - **Memory:** this fork's README reports 40-46 GB private memory on Windows (64 GB recommended).
-  `speed-trial` used 10-11 GB under Wine. Run with a memory guard on 32 GB.
+  Under Wine the game process used 13.6-15.6 GB resident here (`speed-trial`: 10-11 GB); 32 GB with
+  swap was enough.
+- **vkd3d-proton with dxil-spirv from HansKristian-Work/dxil-spirv `694cc674` on.** With the
+  vkd3d-proton of Proton Experimental (and an older local build, dxil-spirv `7c048638`), six of the
+  title's ray-traced shadow compute shaders, as this branch translates them, send dxil-spirv into an
+  endless recursion (`CFGNode::find_common_dominator` <-> `recompute_immediate_dominator`, from
+  `flatten_subgroup_shuffles`). The log shows `victory-pipelines-N has overflowed its stack` about 5 s
+  in; Belobug `81ebb7b`'s compiler guard keeps the process alive, but the six pipelines stay "being
+  made" for the whole run. A bigger worker stack does not help (tried in `13e730d`, reverted in
+  `2d5fa28`). `694cc674` ("Only run fixup passes after structurizer has run") fixes it, found by
+  bisecting with the shaders translated natively (`victory_shader::emit::translate`) and dxil-spirv's
+  CLI. With master (`b540c8a2`) the six convert, `spirv-val` accepts them, and none of a run's 2,707
+  shaders fails. Beqren found the same with vkd3d-proton `71cae09` (avatarmanz/VIctory-7900XTX#111).
+  Used here without changing the prefix: vkd3d-proton's `d3d12core.dll` rebuilt with that dxil-spirv,
+  placed next to `victory.exe`. With `d3d12core=n,b` Wine loads a native DLL from the program's folder
+  before `system32`.
+- **The fork author's settings** (`scripts/play.ps1`, not `-Safe`): `VICTORY_THIN=1`,
+  `VICTORY_JOIN_PARTS=8`, `VICTORY_UPLOAD_AHEAD=1`, `VICTORY_RELAY=2`, `VICTORY_CARD_STEPS=2` and the
+  others listed there. Standing still: **575 ms a frame with this fork's defaults (run 33), 290-301 ms
+  with these (runs 34-36)**, while the times the frame line gives for our own work hardly changed.
+  Likely `VICTORY_THIN`, which takes the list calls off the title's threads (not tested alone).
+
+## Changes on this branch
+
+| Commit | What |
+|---|---|
+| `76f8581` | `VICTORY_AMBIENT=<share>,floor:<level>`: the ambient stand-in's estimate, never below beloooo's constant. Indoors without rays the estimate feeds on itself (dark walls send out little), and a room stayed too dark at `0.8`. Used as `0.8,floor:0.6`; no measurable frame cost. |
+
+## Where the frame goes (runs 35-36)
+
+One title thread is at ~93% of a core, but it waits: ~55% in `mwaitx` on a 64-bit counter (image
+`+0x4fb0bd0`, called near the title's frame limiter of Marvisak/VIctory#2469), ~33% in the `Sleep(0)`
+between waits, which Proton's `NtDelayExecution` turns into `getrusage` and `sched_yield`. Stack dumps
+(`VICTORY_STACKS`) show the other title threads in kernel waits and our submitting thread idle. The
+frame line: 17 title submissions a frame with ~215 ms of the frame between them. Hypothesis: the
+frame is a series of round trips (submission, card, copy back, the counter), bound by their latency
+rather than by any thread's work [stacks and counters measured; the cause not proven].
 
 ## Ported from `speed-trial`
 
@@ -46,3 +84,9 @@ remember unmapped title memory), `4fa10ea` (pins per block; this base has no pin
 
 Tests: `victory-game` and `victory-loader` unit tests pass under Proton's `wine`; `load_probe` fails
 there because it starts `cargo` from inside Wine (`Invalid handle`), not because of the code.
+`victory-gpu`'s test binary printed nothing under Wine here (it needs the host's graphics DLLs set
+up), so the ambient change was checked in the game (its shader compiled and ran) rather than by
+`ambient::tests`.
+
+Open: the logo videos jump back and forth since this base (runs 33 on; not on `speed-trial`, which
+had Belobug's uncapped frame pacing `fa07481`); not looked into yet.
