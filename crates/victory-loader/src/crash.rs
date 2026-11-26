@@ -11,6 +11,7 @@
 //! often states the reason. Panics of ours go to the crash log too.
 
 use std::ptr::null_mut;
+use std::sync::atomic::Ordering;
 use windows_sys::Win32::Foundation::{
     EXCEPTION_ACCESS_VIOLATION, EXCEPTION_BREAKPOINT, EXCEPTION_ILLEGAL_INSTRUCTION,
     EXCEPTION_INT_DIVIDE_BY_ZERO, EXCEPTION_PRIV_INSTRUCTION, EXCEPTION_STACK_OVERFLOW, HMODULE,
