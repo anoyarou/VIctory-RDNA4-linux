@@ -2393,6 +2393,9 @@ static THIN_FUNCTIONS: Table<160> = Table(thin::table(false));
 #[cfg(windows)]
 static NEWER_THIN_FUNCTIONS: Table<160> = Table(thin::table(true));
 
+#[cfg(all(test, windows))]
+mod factory_pool_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
