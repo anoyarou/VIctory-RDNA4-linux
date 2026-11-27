@@ -261,6 +261,31 @@ still [measured on one machine]. **Run 70** (same build, + `CARD_BUFFERS_MIN_KB=
 Left out: avatarmanz/VIctory-7900XTX#436 (`FILL_FORWARD`; an ownership bug reported in review), Marvisak/VIctory#3535 and
 #3516 (conflict throughout), Belobug/VIctory-Belobug-AMD#622 (conflicts in `pipeline/make.rs`).
 
+## Ported 2026-11-27 from maren-halv/VIctory-Fast (`b109dc2`; untested in game)
+
+maren-halv/VIctory-Fast (GPL-3.0; Windows 11, RX 9070 XT, AMD's driver) shares no history with this
+branch, so these are hand ports, each naming its commit. What was looked at and left out, and why:
+`VICTORY-FAST-STUDY.md` in the user's notes (not in this repository).
+- `79a92c7`: per-shard latest asking (`max_written`) in the watch journal; `nothing_new` passes over shards
+  with nothing newer than the lowest asking its pages were taken after (`Notes::all_below`), with no
+  gathering or sorting. The heap pass looks at each slot once.
+- `7da8eb5`: the heap pass mirrors through `HostHeap::mirror_heap_pass`, which does not requeue the slot in
+  `buffer_changes`; a slot a draw read through a table lately is not requeued when seen.
+- Aimed at run 91's busy frames (70.8 ms at 7,883 draws): 7,759 refreshes a frame on the submitting thread,
+  6,769 known to copy nothing, 19.6 ms.
+- Not ported: `008f546`/`c827852`'s skip of covered refresh steps (here `Batch::add` already returns after
+  one lookup for them), `VICTORY_PORT_EXPAND` and `VICTORY_INPLACE_SECTIONS` (title memory in place: RADV
+  cannot import section views under Wine; port 1 gave dark frames, run 64), `VICTORY_GPU_ONLY_COPYBACK`
+  (off in their own benchmark; skips write-backs the title may read), native DXR, and DXIL tuning for AMD's
+  Windows compiler.
+
+**PC FSR 4.1.2 (`VICTORY_FSR_4K`), set up, untested:** `scripts/linux/run.sh` takes
+`VICTORY_FSR_4K=quality|balanced|performance`. It needs the FidelityFX SDK's
+`amd_fidelityfx_upscaler_dx12.dll` (4.1.1.2740 from a PC game works as the loader) in `VICTORY_FIDELITYFX_DIR`,
+and FSR 4.1.2 itself from AMD's driver part `amdxcffx64.dll` (in AMD's Windows driver package; carries
+`4.1.2`/`FSR4`) in the prefix's `system32`, as Proton's own FSR 4 upgrade does. The title then draws for
+3840x2160, rendering 2560x1440, 2259x1270 or 1920x1080 inside.
+
 ## Ported from `speed-trial`
 
 | Commit there | Here | What |

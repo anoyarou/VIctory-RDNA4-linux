@@ -15,6 +15,11 @@
 #   GAMESCOPE_MODE windowed (a normal, movable window) | borderless | fullscreen [windowed]
 #   GAMESCOPE_OUT_W/H  the window or screen size [the render size]; e.g. 2560x1440 with fullscreen
 #   GAMESCOPE_FILTER   gamescope's upscaler when the two sizes differ: linear, fsr, nis, nearest [linear]
+#   VICTORY_FSR_4K     PC FSR 4.1.2 at 3840x2160: quality | balanced | performance [unset: the title's own];
+#                  needs amd_fidelityfx_upscaler_dx12.dll (FidelityFX SDK, from a PC game) in
+#                  VICTORY_FIDELITYFX_DIR [$VICTORY_DIR/fidelityfx] and AMD's driver part amdxcffx64.dll
+#                  (from AMD's Windows driver package) in the prefix's system32. Then GAMESCOPE_W/H
+#                  default to 3840x2160 and GAMESCOPE_OUT_W/H to 1600x900.
 # Super+F toggles fullscreen in any mode. What each setting is for, measured: docs/linux-wine.md.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,6 +49,12 @@ export RADV_EXPERIMENTAL="${RADV_EXPERIMENTAL-transfer_queue}"
 # Controllers through SDL (DualSense and others).
 export SDL_JOYSTICK_HIDAPI="${SDL_JOYSTICK_HIDAPI:-1}" PROTON_DISABLE_HIDRAW="${PROTON_DISABLE_HIDRAW:-1}"
 
+if [ -n "${VICTORY_FSR_4K:-}" ] && [ "${VICTORY_FSR_4K}" != 0 ]; then
+    export VICTORY_FSR_4K
+    export VICTORY_FIDELITYFX_DIR="${VICTORY_FIDELITYFX_DIR:-Z:$(printf '%s' "$VICTORY_DIR/fidelityfx" | tr / '\\')}"
+    GAMESCOPE_OUT_W="${GAMESCOPE_OUT_W:-1600}" GAMESCOPE_OUT_H="${GAMESCOPE_OUT_H:-900}"
+    GAMESCOPE_W="${GAMESCOPE_W:-3840}" GAMESCOPE_H="${GAMESCOPE_H:-2160}"
+fi
 GAMESCOPE_W="${GAMESCOPE_W:-1600}" GAMESCOPE_H="${GAMESCOPE_H:-900}"
 GAMESCOPE_OUT_W="${GAMESCOPE_OUT_W:-$GAMESCOPE_W}" GAMESCOPE_OUT_H="${GAMESCOPE_OUT_H:-$GAMESCOPE_H}"
 GAMESCOPE_MODE="${GAMESCOPE_MODE:-windowed}"
