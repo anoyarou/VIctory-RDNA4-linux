@@ -21,8 +21,12 @@
 
 # Title buffers of 1 MiB and more keep their copy on the card (16 GB cards default to 4 MiB): 75 -> 67 ms
 # standing, ~130 -> ~29 MB compared a frame (idea from Belobug/VIctory-Belobug-AMD#444).
-# Known cost: a few textures in one colour and some artifacts. Unset it (VICTORY_CARD_BUFFERS_MIN_MB=) for the default.
+# Alone it costs a few textures in one colour and some artifacts; the MIN_KB line below overrides it.
 : "${VICTORY_CARD_BUFFERS_MIN_MB:=1}"
+# Every title buffer from 64 KiB on the card, up to 4 GiB of them (Belobug/VIctory-Belobug-AMD#546). On an RX 9070 XT:
+# 57-59 ms a frame instead of 59-60, and the one-colour textures of MIN_MB=1 gone; ~14 of 16 GiB of VRAM in use.
+# MIN_KB overrides MIN_MB. Lower CARD_BUFFERS_MB on cards with less VRAM.
+: "${VICTORY_CARD_BUFFERS_MIN_KB:=64}" "${VICTORY_CARD_BUFFERS_MB:=4096}"
 
 # Shaders' writes into write-combined title memory stay on the card (Belobug/VIctory-Belobug-AMD#477):
 # copy-back 27 -> 13 ms, 67 -> 59-61 ms standing.

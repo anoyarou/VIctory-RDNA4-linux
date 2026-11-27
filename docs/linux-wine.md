@@ -10,18 +10,22 @@ area) [measured on one machine].
 Runs 44-65 continued the same way (from 2026-11-27 standing at a snake terrarium in the house, a new save);
 the newest results are in the sections below, and the current state is summed up next.
 
-## Where it stands (2026-11-27, runs 59-65)
+## Where it stands (2026-11-27, runs 59-70)
 
 - **Picture:** plants near the player no longer pop (avatarmanz/VIctory-7900XTX#437, run 59); faces and skin right with
-  the defaults. `VICTORY_CARD_BUFFERS_MIN_MB=1` costs a one-colour couch texture and some artifacts (run 63).
-- **Speed:** **59-61 ms a frame (16.5-17 fps)** standing at the terrarium (~5,950 draws) with
-  `VICTORY_CARD_BUFFERS_MIN_MB=1` and `VICTORY_WC_NO_BACK=1` (run 65; 67 ms with the first alone, run 63); ~12 fps
+  the defaults. `VICTORY_CARD_BUFFERS_MIN_MB=1` alone costs a one-colour couch texture and some artifacts (run 63);
+  with `VICTORY_CARD_BUFFERS_MIN_KB=64` and `VICTORY_CARD_BUFFERS_MB=4096` the couch is right again (run 70).
+- **Speed:** **57-59 ms a frame (17-17.7 fps)** standing at the terrarium (~7,500 draws) with `VICTORY_WC_NO_BACK=1`,
+  `VICTORY_CARD_BUFFERS_MIN_KB=64` and `VICTORY_CARD_BUFFERS_MB=4096` (run 70; ~14 of 16 GiB of VRAM). 59-61 ms with
+  `VICTORY_CARD_BUFFERS_MIN_MB=1` instead (run 65; 67 ms without `WC_NO_BACK`, run 63); ~12 fps
   while playing [user, before run 65]. Our submitting thread sets the frame, not the card: card busy ~41 ms
   (avatarmanz/VIctory-7900XTX#429's critical path, run 62).
 - **Settings to leave alone:** `VICTORY_SUBMIT_FRAMES=2` (no gain, waxy faces, run 60); `VICTORY_PORT_GUARD`/
   `VICTORY_PORT_JOURNAL` (runs 44, earlier); #440's renderer-patch set `VICTORY_PORT_CONSTANTS/DESCRIPTORS/CBV=1` with its
   60 fps pacing (161-176 ms and a too-dark floor here, run 64).
 - **`VICTORY_WC_NO_BACK=1`** (Belobug/VIctory-Belobug-AMD#477) alone: copy-back 27 -> 13 ms, picture right (run 65).
+- **`VICTORY_CARD_BUFFERS_MIN_KB=64` + `VICTORY_CARD_BUFFERS_MB=4096`** (Belobug/VIctory-Belobug-AMD#546; 63 -> 49 ms on a
+  9070 XT under Windows): here 59-60 -> 57-59 ms, copy-back ~12 -> 8-12 ms, couch right (run 70, `7d7800a`, Mesa 26.2.8).
 - **Wineserver:** runs 52-57 used stock Proton's by mistake (164 ms where the view-tree one gives 81 ms, run 58); our
   launcher defaults to the patched one since.
 
@@ -213,7 +217,8 @@ patches or the pacing darkened it. Terrarium, ~5,950 draws: **59-61 ms** (run 63
 Seven open PRs that merged with no conflicts, one merge commit each (`6fe8b1f`..`45497e9`); #478 was reverted after runs
 67-68. **Run 69** (`7d7800a`, the other six, Mesa 26.2.8): terrarium, standing, ~7,000 draws, **59-60 ms**, copies 61-63 MB,
 refresh flushes 21.6 ms, picture normal [user]: the same as run 65, so the six neither gain nor cost measurably standing
-still [measured on one machine].
+still [measured on one machine]. **Run 70** (same build, + `CARD_BUFFERS_MIN_KB=64`, `CARD_BUFFERS_MB=4096`): ~7,500 draws,
+**57-59 ms**, copy-back 8-12 ms (0.6 MB), refresh flushes 21.6 ms; couch texture right [user]; VRAM 13.9 GiB used.
 
 - **Belobug/VIctory-Belobug-AMD#636** (MamaLeVrai): a slot flipped ahead under relay 2 waits for the submissions begun
   when it was queued (part of Belobug/VIctory-Belobug-AMD#545). Candidate for the waxy faces with `VICTORY_SUBMIT_FRAMES=2`.

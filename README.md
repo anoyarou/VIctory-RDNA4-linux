@@ -30,7 +30,8 @@ Tested on one machine only:
 
 | | |
 |---|---|
-| Standing in the house (~5,950 draws), with `VICTORY_CARD_BUFFERS_MIN_MB=1` and `VICTORY_WC_NO_BACK=1` | 59-61 ms a frame (16.5-17 fps) |
+| Standing in the house (~7,500 draws), with `VICTORY_WC_NO_BACK=1`, `VICTORY_CARD_BUFFERS_MIN_KB=64` and `VICTORY_CARD_BUFFERS_MB=4096` | 57-59 ms a frame (17-17.7 fps) |
+| The same (~5,950 draws) with `VICTORY_CARD_BUFFERS_MIN_MB=1` instead of the last two | 59-61 ms (16.5-17 fps) |
 | The same, with neither | 75-77 ms (13 fps) |
 | Playing | about 12 fps |
 | Memory | game process 14-16 GB resident; 32 GB with swap was enough |
@@ -49,8 +50,9 @@ What is known to be wrong here:
   builder's, which is off (Belobug/VIctory-Belobug-AMD#269).
 - Lighting indoors is only approximate without ray tracing (an ambient stand-in).
 - Loading the world takes more than 40 s.
-- `VICTORY_CARD_BUFFERS_MIN_MB=1` is faster but some textures show in one colour
-  and a few artifacts appear.
+- `VICTORY_CARD_BUFFERS_MIN_MB=1` on its own is faster but some textures show in one colour
+  and a few artifacts appear; `VICTORY_CARD_BUFFERS_MIN_KB=64` with `VICTORY_CARD_BUFFERS_MB=4096`
+  avoids that and uses ~14 of 16 GiB of VRAM.
 - The renderer patches (`VICTORY_PORT_CONSTANTS/DESCRIPTORS/CBV`), which make other
   Wine setups much faster (avatarmanz/VIctory-7900XTX#440), are more than twice as
   slow here and darken floors (run 64); leave them off for now.
@@ -85,7 +87,8 @@ By hand, with a Wine prefix of Proton's:
 - A wineserver with the view-tree patch, or loading the world is far slower.
 - The settings of `scripts/play.ps1` (not `-Safe`) as environment variables, plus
   `VICTORY_FETCH_CHECK=1` (without it the characters' skin looks wrong) and
-  `VICTORY_CARD_BUFFERS_MIN_MB=1` (faster, some textures wrong) and `VICTORY_WC_NO_BACK=1`
+  `VICTORY_CARD_BUFFERS_MIN_KB=64` with `VICTORY_CARD_BUFFERS_MB=4096` (faster; needs ~14 GiB of VRAM;
+  Belobug/VIctory-Belobug-AMD#546) and `VICTORY_WC_NO_BACK=1`
   (copy-back halved, Belobug/VIctory-Belobug-AMD#477). Leave
   `VICTORY_PORT_GUARD` and `VICTORY_PORT_JOURNAL` off (clothes look plastic, skin waxy),
   and `VICTORY_SUBMIT_FRAMES` unset (2 brings back waxy faces).
