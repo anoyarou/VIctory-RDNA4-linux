@@ -53,6 +53,51 @@ fn parse_ms(spec: &str) -> Option<Duration> {
     Some(Duration::from_nanos((ms * 1e6).round() as u64))
 }
 
+/// `VICTORY_FRAME_INTERVAL_DRAWS=<n>` (read here; with
+/// `VICTORY_FRAME_INTERVAL_MS`, and unset: that interval for every frame, as
+/// before): the interval asked for only after a frame that ran `n` draws or
+/// more, and the title's own 33.3 ms after the others (from the start, and
+/// again after thirty of them in a row).
+///
+/// The title's opening animation and videos are made for its 30 frames a
+/// second. Ticked at 60 with the launcher's settings, 7 of 100 frames in a
+/// row of the animation were the frame before again, a hitch every fourteenth
+/// frame, and 58 of 100 of a video of 24 pictures a second, two and three
+/// ticks a picture by turns (run 98, docs/linux-wine.md). With this the
+/// videos and menus tick as the title has them and the world as asked.
+fn interval_from_draws() -> Option<u64> {
+    static LEAST: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *LEAST.get_or_init(|| std::env::var("VICTORY_FRAME_INTERVAL_DRAWS").ok().and_then(|v| v.trim().parse::<u64>().ok()))
+}
+
+/// The title's own interval of menus and videos.
+const THIRTIETH: Duration = Duration::from_micros(33_333);
+
+/// A frame was presented that ran `draws` draws: the clock ticks by what
+/// [`interval_from_draws`] says of it from now on.
+pub(crate) fn frame_drew(draws: u64) {
+    let (Some(least), Some(fast)) = (interval_from_draws(), asked()) else {
+        return;
+    };
+    // Back to the title's own only after a second of such frames: a frame of
+    // the world can count few draws (its lists are translated into the
+    // frame after), and the clock changed 183 times in 100 s without this
+    // (run 99).
+    static FEW: AtomicU64 = AtomicU64::new(u64::MAX / 2);
+    let few = if draws < least { FEW.fetch_add(1, Ordering::Relaxed) + 1 } else { FEW.swap(0, Ordering::Relaxed) * 0 };
+    let wanted = if few >= 30 { THIRTIETH.max(fast) } else { fast };
+    let mut clock = clock();
+    let Some(c) = clock.as_mut() else { return };
+    if c.interval == wanted {
+        return;
+    }
+    // As a new interval set by the title: from now, after the last tick
+    // handed out.
+    let first = LAST.iter().map(|t| t.load(Ordering::Relaxed)).max().unwrap_or(0);
+    *c = Clock { start: Instant::now(), interval: wanted, first };
+    tracing::info!(interval = ?wanted, draws, "frame interval by the frame's draws (VICTORY_FRAME_INTERVAL_DRAWS)");
+}
+
 struct Clock {
     start: Instant,
     interval: Duration,

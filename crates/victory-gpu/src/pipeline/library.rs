@@ -458,10 +458,39 @@ fn library() -> Option<&'static Library> {
         .as_ref()
 }
 
+/// Whether an empty library is asked for with a null address (see [`open`]):
+/// under Wine, unless `VICTORY_LIBRARY_NULL=0`.
+fn null_when_empty() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| super::on_wine() && std::env::var_os("VICTORY_LIBRARY_NULL").is_none_or(|v| v != "0"))
+}
+
 /// The library in `blob`, or an empty one if the host rejects the blob (an
 /// adapter or driver change, damage).
 fn open(device: &ID3D12Device1, blob: Blob) -> Option<Library> {
     let make = |bytes: &[u8]| -> windows::core::Result<ID3D12PipelineLibrary1> {
+        // Under Wine an empty library is asked for with no address at all:
+        // vkd3d-proton refuses a blob of no bytes that has one (an empty
+        // slice's is not null), so no library was ever made there, no
+        // pipeline kept and none started early: "no host pipeline library:
+        // pipelines are not kept" in every run's log, and each run made the
+        // world's pipelines at its first frames (docs/linux-wine.md).
+        // `VICTORY_LIBRARY_NULL=0`: asked as on Windows.
+        if bytes.is_empty() && null_when_empty() {
+            let mut made: Option<ID3D12PipelineLibrary> = None;
+            // SAFETY: the method's own signature; no bytes are read.
+            unsafe {
+                (windows::core::Interface::vtable(device).CreatePipelineLibrary)(
+                    windows::core::Interface::as_raw(device),
+                    std::ptr::null(),
+                    0,
+                    &<ID3D12PipelineLibrary as windows::core::Interface>::IID,
+                    (&raw mut made).cast(),
+                )
+                .ok()?;
+            }
+            return made.ok_or_else(windows::core::Error::empty)?.cast();
+        }
         // SAFETY: the bytes outlive the library (kept beside it).
         unsafe {
             if bytes.is_empty() {
