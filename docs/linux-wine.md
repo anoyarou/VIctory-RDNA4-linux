@@ -208,10 +208,12 @@ code darkens the floor.
 patches or the pacing darkened it. Terrarium, ~5,950 draws: **59-61 ms** (run 63: 67), copy-back 13 ms (27), Present
 16.8 ms, refresh flushes 21.2 ms, card busy 34-36 ms; no errors [measured on one machine].
 
-## Merged 2026-11-27, third round (`45497e9`; not yet run)
+## Merged 2026-11-27, third round (`45497e9`; `7d7800a` without #478, runs 67-69)
 
-Seven open PRs that merged with no conflicts, one merge commit each (`6fe8b1f`..`45497e9`). All untested in the game
-here; built only.
+Seven open PRs that merged with no conflicts, one merge commit each (`6fe8b1f`..`45497e9`); #478 was reverted after runs
+67-68. **Run 69** (`7d7800a`, the other six, Mesa 26.2.8): terrarium, standing, ~7,000 draws, **59-60 ms**, copies 61-63 MB,
+refresh flushes 21.6 ms, picture normal [user]: the same as run 65, so the six neither gain nor cost measurably standing
+still [measured on one machine].
 
 - **Belobug/VIctory-Belobug-AMD#636** (MamaLeVrai): a slot flipped ahead under relay 2 waits for the submissions begun
   when it was queued (part of Belobug/VIctory-Belobug-AMD#545). Candidate for the waxy faces with `VICTORY_SUBMIT_FRAMES=2`.
@@ -231,6 +233,16 @@ here; built only.
   reports as private memory, so they were never guarded and were copied every frame: runs 67-68, copies up 8-10 GB a frame
   (run 65: 58 MB), 1.2-1.6 s a frame [measured]. The crash it fixes (a stack between section views) needs the view
   layout that `WINE_MAP` replaces.
+
+  | at the terrarium, standing | without #478 (runs 65, 69) | with #478 (runs 67, 68) |
+  |---|---|---|
+  | copies up per frame | 58 / 62 MB | 7,951 / 10,205 MB |
+  | frame | 59-61 / 59-60 ms | 1,238 / 1,589 ms |
+
+  How to see it: the PR's `memory in a range asked about as a view is no view` lines (it prints 16 at most). In run 68
+  all 16 were `kind=0x20000` (`MEM_PRIVATE`), `protection=0x4`, about 224 MB, the first at startup. If both are ever
+  wanted in one tree, one way (untried) is to count committed private memory inside the title's own reservations
+  (`wine_map`'s `Spaces`) as a view in #478's `there()`; the stack case it fixes lies outside them.
 - **avatarmanz/VIctory-7900XTX#450** (UwUCammie): `VICTORY_EARLY_SCREEN_MAX_BYTES` (off unless set) compiles small screen
   pipelines at creation.
 - **Belobug/VIctory-Belobug-AMD#625** (11run11): texture store kept levels bounded by host memory; only with
