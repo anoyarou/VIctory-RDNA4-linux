@@ -572,6 +572,18 @@ pub(crate) fn submissions() -> (u64, u64) {
     (STARTED.load(Ordering::Acquire), FINISHED.load(Ordering::Acquire))
 }
 
+/// A submission begun, as a test's list in the air stands for one (tests).
+#[cfg(test)]
+pub(crate) fn test_begin_submission() -> u64 {
+    STARTED.fetch_add(1, Ordering::AcqRel) + 1
+}
+
+/// The submission [`test_begin_submission`] made has finished (tests).
+#[cfg(test)]
+pub(crate) fn test_finish_submission(number: u64) {
+    FINISHED.fetch_max(number, Ordering::AcqRel);
+}
+
 /// Drops `object` once every submission running now has finished: at once
 /// if none is.
 pub(crate) fn retire<T: 'static>(object: T) {
