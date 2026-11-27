@@ -9,7 +9,7 @@ this card.
 | Script | What it does |
 |---|---|
 | `build-xwin.sh` | Cross-builds `victory.exe` with cargo-xwin; `--diag` for logs and the panel, `--deploy-dir <dir>` to copy it where `run.sh` starts it |
-| `run.sh` | Starts the title under gamescope (windowed, borderless or fullscreen) with `settings.sh` |
+| `run.sh` | Starts the title under gamescope (windowed, borderless or fullscreen) with `settings.sh`; `VICTORY_FSR_4K=performance` for PC FSR 4.1.2 (see its header for the DLLs it needs) |
 | `run-logged.sh <name>` | `run.sh` with a timestamped console log and a memory log, after stopping what is left of an earlier run in the prefix |
 | `settings.sh` | The `VICTORY_...` settings, each with why; anything set in the environment wins |
 | `memwatch.sh` | Memory every 5 s; stops the game if available memory and free swap fall under 3 GiB |

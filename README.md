@@ -1,192 +1,110 @@
 # VIctory on RDNA 4 under Linux
 
-A fork of [VIctory](https://github.com/Marvisak/VIctory), a compatibility layer
-that runs an Xbox Series title on a PC from files the user supplies. This one is
-about running it **on Linux under Wine/Proton, on an AMD RDNA 4 card**. It is
-playable, slowly.
+A fork of [VIctory](https://github.com/Marvisak/VIctory), a compatibility layer that runs an Xbox
+Series title on a PC from files the user supplies. This one runs it **on Linux under Wine/Proton, on
+an AMD RDNA 4 card**. It is playable, slowly.
 
-**Upstream is [Marvisak/VIctory](https://github.com/Marvisak/VIctory)**: fixes are
-taken from there, and our own changes meant for everyone go there as pull requests.
-The tree started from avatarmanz/VIctory-7900XTX (speed on RDNA 3, Windows) with
-Belobug/VIctory-Belobug-AMD's RX 9070 XT fixes (`rx9070xt` branch, `cd8dfc0`). Both
-repositories are no longer reachable on GitHub (since 2026-11-27); everything taken
-from them is in this history with its authors, and the references to their pull
-requests (`avatarmanz/VIctory-7900XTX#…`, `Belobug/VIctory-Belobug-AMD#…`) name
-what was taken even where the links no longer open.
+**Upstream is [Marvisak/VIctory](https://github.com/Marvisak/VIctory)**: fixes are taken from there,
+and changes meant for everyone go there as pull requests. The tree started from
+avatarmanz/VIctory-7900XTX with Belobug/VIctory-Belobug-AMD's RX 9070 XT fixes; both repositories no
+longer open on GitHub (since 2026-11-27), but their work is in this history with its authors, and
+references such as `avatarmanz/VIctory-7900XTX#…` still name what was taken.
 
-**This repository contains no game files, code or assets.** You need your own
-copy of the game. It is not affiliated with or endorsed by the game's developer
-or publisher.
+**This repository contains no game files, code or assets.** You need your own copy of the game. It is
+not affiliated with or endorsed by the game's developer or publisher.
 
 ## Where it stands (2026-11-27)
 
-Tested on one machine only:
+Tested on one machine:
 
-| | |
+| Part | Setup |
 |---|---|
 | CPU | AMD Ryzen 9 5950X (16 cores, 32 threads) |
-| GPU | AMD Radeon RX 9070 XT, 16 GB (Navi 48, GFX1201) |
-| RAM | 32 GB, plus 32 GB of swap (8 GB zram, 24 GB file) |
-| OS | Fedora 44, kernel 7.3.5, KDE Plasma 6.8.3 on Wayland |
-| Driver | Mesa 26.2.7 RADV |
-| Wine | Proton Experimental `experimental-11.0-20261112` with a patched wineserver (view tree, Wine bug 60868), inside gamescope at 1600x900 |
-| Direct3D 12 | vkd3d-proton's `d3d12core.dll` rebuilt with dxil-spirv `b540c8a2` (see below) |
-| Profile | Series X, from a save (after the first mission) |
+| GPU | AMD Radeon RX 9070 XT, 16 GB (GFX1201) |
+| RAM | 32 GB, plus 32 GB of swap |
+| OS | Fedora 44, kernel 7.3.6, KDE Plasma 6.8.3 on Wayland |
+| Driver | Mesa 26.2.8 RADV |
+| Wine | Proton Experimental `experimental-11.0-20261112` with a patched wineserver (view tree, Wine bug 60868), in gamescope |
+| Direct3D 12 | vkd3d-proton's `d3d12core.dll` rebuilt with dxil-spirv `b540c8a2` |
+| Upscaler | PC FSR 4.1.2: 1920x1080 inside, 3840x2160 out |
 
-| | |
+| Scene | Frame time |
 |---|---|
-| Standing in the house (~7,500 draws), with `VICTORY_WC_NO_BACK=1`, `VICTORY_CARD_BUFFERS_MIN_KB=64` and `VICTORY_CARD_BUFFERS_MB=4096` | 57-59 ms a frame (17-17.7 fps) |
-| The same (~5,950 draws) with `VICTORY_CARD_BUFFERS_MIN_MB=1` instead of the last two | 59-61 ms (16.5-17 fps) |
-| The same, with neither | 75-77 ms (13 fps) |
-| Playing | about 12 fps |
-| Memory | game process 14-16 GB resident; 32 GB with swap was enough |
+| Standing in the house (~6,000-7,500 draws) | 57-61 ms (16.5-17.5 fps), with or without FSR 4 |
+| Busy scenes (8,000-10,000 draws) | 80-100 ms |
+| Playing | about 12-16 fps |
+| Memory | game process 14-16 GB resident |
 
-Faces move (mouths, brows, blinks), skin and clothes look right, plants near the
-player no longer pop (avatarmanz/VIctory-7900XTX#437), and the logo videos play
-smoothly. The CPU, not the card, sets the frame: our submitting thread works the
-whole frame while the card is busy about 41 ms of it.
+Faces, skin and clothes look right, plants no longer pop, night skies are right, and the picture is
+sharp with FSR 4. The CPU sets the frame, not the card: our submitting thread works the whole frame,
+much of it on Wine's cost of noticing the title's memory writes, while the card is about half busy.
 
-It started at ~575 ms a frame on this base (2 fps). What brought it down, run by
-run, is in [docs/linux-wine.md](docs/linux-wine.md).
+Known to be wrong: ~330 draws a frame are dropped (the ray-tracing builder is off,
+Belobug/VIctory-Belobug-AMD#269), indoor light is an approximation without ray tracing, loading the
+world takes over 40 s, and memory grows with play time.
 
-What is known to be wrong here:
-
-- About 330 draws a frame are dropped without a host pipeline: the ray-tracing
-  builder's, which is off (Belobug/VIctory-Belobug-AMD#269).
-- Lighting indoors is only approximate without ray tracing (an ambient stand-in).
-- Loading the world takes more than 40 s.
-- `VICTORY_CARD_BUFFERS_MIN_MB=1` on its own is faster but some textures show in one colour
-  and a few artifacts appear; `VICTORY_CARD_BUFFERS_MIN_KB=64` with `VICTORY_CARD_BUFFERS_MB=4096`
-  avoids that and uses ~14 of 16 GiB of VRAM.
-- The renderer patches (`VICTORY_PORT_CONSTANTS/DESCRIPTORS/CBV`), which make other
-  Wine setups much faster (avatarmanz/VIctory-7900XTX#440), are more than twice as
-  slow here and darken floors (run 64); leave them off for now.
+How it got from ~575 ms a frame to here, run by run: [docs/linux-wine.md](docs/linux-wine.md).
 
 ## How to run it on Linux
 
-Built on Linux with [cargo-xwin](https://github.com/rust-cross/cargo-xwin) for
-`x86_64-pc-windows-msvc`; no Windows machine needed.
+Built on Linux with [cargo-xwin](https://github.com/rust-cross/cargo-xwin); no Windows machine needed.
 
 ```bash
 git clone https://github.com/anoyarou/VIctory-RDNA4-linux
 cd VIctory-RDNA4-linux
 cp victory.example.toml victory.toml      # then set your paths, outside this folder
-cargo xwin build --profile diag --target x86_64-pc-windows-msvc -p victory --features victory/diagnostics
 ```
 
-The scripts in [scripts/linux/](scripts/linux/README.md) do all of the below: `build-xwin.sh`
-builds, `run.sh` / `run-logged.sh` start it in gamescope (windowed, borderless or fullscreen) with the
-settings measured here (`settings.sh`).
+[scripts/linux/](scripts/linux/README.md) builds it (`build-xwin.sh`) and starts it in gamescope
+(`run.sh`, `run-logged.sh`) with the settings measured here (`settings.sh`). What they need:
 
-By hand, with a Wine prefix of Proton's:
-
-- `WINEDLLOVERRIDES="d3d12,d3d12core,dxgi,d3d11,d3d10core=n,b;d3dcompiler_47=n"`, and a
-  64-bit Microsoft `d3dcompiler_47.dll` next to `victory.exe`.
-- `VKD3D_CONFIG=ignore_shared_fence,descriptor_heap` (needs Resizable BAR).
-- `RADV_EXPERIMENTAL=transfer_queue`: copies on the SDMA queue, copy-back ~38 -> 24-27 ms
-  (avatarmanz/VIctory-7900XTX#111).
-- **A vkd3d-proton with dxil-spirv `694cc674` or later** (vkd3d-proton master
-  `71cae09` has it). With older ones six shadow pipelines are never made and each
-  frame waits 500 ms for them. Rebuilt `d3d12core.dll` next to `victory.exe` works
-  without touching Proton or the prefix.
+- A Proton prefix, with a 64-bit Microsoft `d3dcompiler_47.dll` next to `victory.exe`.
+- A vkd3d-proton with dxil-spirv `694cc674` or later (vkd3d-proton master `71cae09` has it): with older
+  ones every frame waits 500 ms for six shadow pipelines. A rebuilt `d3d12core.dll` next to
+  `victory.exe` is enough.
 - A wineserver with the view-tree patch, or loading the world is far slower.
-- The settings of `scripts/play.ps1` (not `-Safe`) as environment variables, plus
-  `VICTORY_FETCH_CHECK=1` (without it the characters' skin looks wrong) and
-  `VICTORY_CARD_BUFFERS_MIN_KB=64` with `VICTORY_CARD_BUFFERS_MB=4096` (faster; needs ~14 GiB of VRAM;
-  Belobug/VIctory-Belobug-AMD#546) and `VICTORY_WC_NO_BACK=1`
-  (copy-back halved, Belobug/VIctory-Belobug-AMD#477). Leave
-  `VICTORY_PORT_GUARD` and `VICTORY_PORT_JOURNAL` off (clothes look plastic, skin waxy),
-  and `VICTORY_SUBMIT_FRAMES` unset (2 brings back waxy faces).
-- Optional: PlayStation button prompts, built from your own copy with `victory glyphs`
-  and served with `VICTORY_FILE_PATCH` ([docs/playstation-prompts.md](docs/playstation-prompts.md)).
-- `scripts/play.sh` (from avatarmanz/VIctory-7900XTX#440) is another launcher, with its own prefix and DXVK's
-  dxgi; not used here: its `play-1080p.sh` settings are the slow ones above.
-- `wine victory.exe run <your copy's executable> --execute --console series-x`.
+- Resizable BAR (`VKD3D_CONFIG=ignore_shared_fence,descriptor_heap`).
+- For FSR 4.1.2 (optional): the FidelityFX SDK's `amd_fidelityfx_upscaler_dx12.dll` from a PC game, and
+  AMD's `amdxcffx64.dll` from AMD's Windows driver package in the prefix's `system32`.
 
-All of it, with the reasons and the measurements, is in
-[docs/linux-wine.md](docs/linux-wine.md). Commands and debugging switches:
-[docs/README-fxceless.md](docs/README-fxceless.md); every `VICTORY_...` switch is
-described in a comment where it is read.
-
-## What the RX 7900 XTX base does differently
-
-From avatarmanz/VIctory-7900XTX, in short; the reasons and the measurements (on
-Windows) are in [docs/findings.md](docs/findings.md).
-
-- **List calls are written down, not carried out, on the title's threads**
-  (`VICTORY_THIN`): eight threads of ours translate them.
-- **Submissions are prepared by a thread of ours and joined**
-  (`VICTORY_ASYNC_SUBMIT`, `VICTORY_JOIN_PARTS`), with what can be spread over
-  threads spread: refreshes, compares (AVX2), descriptor records, landings.
-- **What shaders wrote comes back beside the write guards**, by the dwords that
-  changed, on a thread of its own (`VICTORY_RELAY`, `VICTORY_LAND`).
-- **Buffer fills that need bytes still on the card are done on the card**
-  (`VICTORY_CARD_STEPS`) instead of waiting for it.
-- **The title's writes are caught more cheaply**: one view opened at a fault,
-  blocks that rest, places in the title's code that look before they write.
-- **Textures go up on a copy queue of their own** and a slot shows one only after
-  its upload ran, which also ended a device loss that came every 15 minutes or so.
-- **Boats float**: textures that shaders write and the title's CPU reads go back
-  to title memory (from fxceless and Geckomacabre, on by default here).
-- **Frame record and replay** with per-pass times and shader variants compared
-  turn by turn ([docs/replay.md](docs/replay.md)).
+Every setting, with its reason and measurement: [docs/linux-wine.md](docs/linux-wine.md). Commands and
+debugging switches: [docs/README-fxceless.md](docs/README-fxceless.md); each `VICTORY_...` switch is
+described where the code reads it. Optional PlayStation button prompts:
+[docs/playstation-prompts.md](docs/playstation-prompts.md). Capturing and replaying a frame to find a
+picture fault: [docs/replay.md](docs/replay.md).
 
 ## Credits
 
-This is a tree of other people's work with a little more on top. The history is kept, and
-commits taken from elsewhere name the commit and its author.
-avatarmanz/VIctory-7900XTX and Belobug/VIctory-Belobug-AMD no longer open on GitHub
-(2026-11-27); their work is credited below as it was taken.
+This is a tree of other people's work with a little on top. The history is kept, and commits taken
+from elsewhere name the commit and its author.
 
-- **[VIctory](https://github.com/Marvisak/VIctory)** by Marvisak and its
-  contributors: the loader, the runtime services, the Direct3D 12 back end and
-  the shader recompiler.
-- **[avatarmanz/VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX)**:
-  the base of this branch, and the pull requests and reports of the people testing
-  it under Linux (avatarmanz/VIctory-7900XTX#13, avatarmanz/VIctory-7900XTX#59,
-  avatarmanz/VIctory-7900XTX#111, avatarmanz/VIctory-7900XTX#148,
-  avatarmanz/VIctory-7900XTX#166, avatarmanz/VIctory-7900XTX#200 and others), and
-  the face fix of avatarmanz/VIctory-7900XTX#114 with Beqren's raw typed loads.
-- **beloooo ([Belobug/VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD))**:
-  the RX 9070 XT fixes and HUD of the `rx9070xt` branch (`81ebb7b`, `e942896`),
-  texture uploads in the prelude (`5d6bd84`) and the FSR 4.1.2 bridge (`cd8dfc0`).
-- **tippythetaidum (fxceless/victory-fork#927)**: the half views that make faces
-  right on Radeon; **bordersky/victory-linux** and **Fedalv** for carrying and
-  testing the three face pieces together under Linux.
-- **borntofrag34**: the Linux/Wine branch of avatarmanz/VIctory-7900XTX#440 (Wine fixes for the renderer
-  patches, the pipeline library and compute waits under Wine, `scripts/play.sh`); **LloydNicholson**: the plant
-  fix of avatarmanz/VIctory-7900XTX#437; **icecreammule277-dot**: `VICTORY_WC_NO_BACK`
-  (Belobug/VIctory-Belobug-AMD#477); and the authors of avatarmanz/VIctory-7900XTX#423, #429, #443, #446, #447,
-  #448 and Belobug/VIctory-Belobug-AMD#512, #518, picked here with their authors kept.
-- **Kenney** (Input Prompts) and **Xelu** (Free Controller & Key Prompts), both CC0: the PlayStation
-  prompt symbols and controller picture `victory glyphs` builds; not stored here.
-- **[HansKristian-Work/dxil-spirv](https://github.com/HansKristian-Work/dxil-spirv)**
-  and **vkd3d-proton**: the dxil-spirv fix (`694cc674`) the shadow pipelines need.
-- **[fxceless/victory-fork](https://github.com/fxceless/victory-fork)**: the fork the RX 7900 XTX base
-  started from, and the people whose pull requests it carries.
-- **[DexNom/VIctory](https://github.com/DexNom/VIctory)**: ray tracing fixes,
-  cube gradients, sparse textures.
-- **Belobug/VIctory-Belobug-AMD** also: the ambient light idea, pipeline workers,
-  and work by romainhedouin.
-- **[FQY55kai/ZJOU-VICTORY](https://github.com/FQY55kai/ZJOU-VICTORY)**.
-- **[myokex/victory-amd](https://github.com/myokex/victory-amd)**: the guard over
-  every view of a page (with Spexivus, joroyt and tightfall), and Joshua Odom's
-  reads into title memory.
-- **Geckomacabre** and **cxy0072019-sketch**: the texture read-back.
-- **[XCL](https://github.com/ivall/xcl)** (GPL-2.0-only) was read for how the same
-  title behaves under another layer; no code of it is here.
+- **[VIctory](https://github.com/Marvisak/VIctory)** by Marvisak and its contributors: the loader, the
+  runtime services, the Direct3D 12 back end and the shader recompiler.
+- **avatarmanz/VIctory-7900XTX**: the base of this branch (how it differs, measured on Windows:
+  [docs/findings.md](docs/findings.md)), and the Linux testers' pull requests and reports
+  (#13, #59, #111, #148, #166, #200 and others); the face fix of #114 with Beqren's raw typed loads.
+- **beloooo (Belobug/VIctory-Belobug-AMD)**: the RX 9070 XT fixes and HUD (`81ebb7b`, `e942896`),
+  prelude texture uploads (`5d6bd84`), the FSR 4.1.2 bridge (`cd8dfc0`), the ambient light idea and
+  pipeline workers, and work by romainhedouin.
+- **tippythetaidum** (fxceless/victory-fork#927): the half views that make faces right on Radeon;
+  **bordersky/victory-linux** and **Fedalv** for testing the face pieces together under Linux.
+- **borntofrag34**: the Wine branch of avatarmanz/VIctory-7900XTX#440; **LloydNicholson**: the plant fix
+  (#437); **icecreammule277-dot**: `VICTORY_WC_NO_BACK` (Belobug/VIctory-Belobug-AMD#477); the authors of
+  avatarmanz/VIctory-7900XTX#423, #429, #443, #446, #447, #448 and Belobug/VIctory-Belobug-AMD#512, #518.
+- **[maren-halv/VIctory-Fast](https://github.com/maren-halv/VIctory-Fast)**: watch-journal and heap-pass
+  changes (`79a92c7`, `7da8eb5`).
+- **[fxceless/victory-fork](https://github.com/fxceless/victory-fork)**, **[DexNom/VIctory](https://github.com/DexNom/VIctory)**,
+  **[FQY55kai/ZJOU-VICTORY](https://github.com/FQY55kai/ZJOU-VICTORY)**,
+  **[myokex/victory-amd](https://github.com/myokex/victory-amd)** (with Spexivus, joroyt, tightfall and
+  Joshua Odom), **Geckomacabre** and **cxy0072019-sketch**: fixes carried through the base.
+- **[HansKristian-Work/dxil-spirv](https://github.com/HansKristian-Work/dxil-spirv)** and
+  **vkd3d-proton**: the shadow-pipeline fix (`694cc674`) and FSR 4 under Vulkan.
+- **Kenney** and **Xelu** (both CC0): the PlayStation prompt art `victory glyphs` builds; not stored here.
+- **[XCL](https://github.com/ivall/xcl)** (GPL-2.0-only) was read for how the title behaves under another
+  layer; none of its code is here.
 - This fork's changes were made with [Claude Code](https://claude.com/claude-code).
 
 ## License
 
-GPL-3.0-or-later, as VIctory. See [LICENSE](LICENSE); the one file that is not
-covered is named in [docs/asset-policy.md](docs/asset-policy.md).
-
-### Host-list reuse during thin replay
-
-Materializing a thin replay takes an already completed and reset host list
-from the existing idle pool before allocating a new one. This preserves its
-command allocators and private indirect budget. `VICTORY_LIST_CREATE_POOL=0`
-keeps the previous constructor behavior for comparison; the existing
-`VICTORY_LIST_POOL=0` still disables recycling. Pool limits and completion
-requirements are unchanged.
+GPL-3.0-or-later, as VIctory. See [LICENSE](LICENSE); the one file not covered is named in
+[docs/asset-policy.md](docs/asset-policy.md).

@@ -15,8 +15,13 @@ area) [measured on one machine].
 Runs 44-65 continued the same way (from 2026-11-27 standing at a snake terrarium in the house, a new save);
 the newest results are in the sections below, and the current state is summed up next.
 
-## Where it stands (2026-11-27, runs 59-70)
+## Where it stands (2026-11-27, runs 59-94)
 
+- **Newest (runs 90-94):** night sky right with `VICTORY_AMBIENT=0.8` without the `,floor:0.6` (run 90); PC FSR 4.1.2
+  works under Proton (`VICTORY_FSR_4K=performance`, `FSR4_UPGRADE=1`: 1920x1080 inside, 3840x2160 out): sharper, no
+  obvious artifacts, 59-61 ms at the terrarium, the same as without it (run 94). Busy scenes 80-100 ms at 8,000-10,000
+  draws. Of a 70 ms busy frame, threads wait ~40 ms for write guards and ~17 ms changing page protections (Wine's
+  cost of noticing the title's writes); refreshes take ~18 ms, ~88 % of them finding nothing to copy.
 - **Picture:** plants near the player no longer pop (avatarmanz/VIctory-7900XTX#437, run 59); faces and skin right with
   the defaults. `VICTORY_CARD_BUFFERS_MIN_MB=1` alone costs a one-colour couch texture and some artifacts (run 63);
   with `VICTORY_CARD_BUFFERS_MIN_KB=64` and `VICTORY_CARD_BUFFERS_MB=4096` the couch is right again (run 70).
