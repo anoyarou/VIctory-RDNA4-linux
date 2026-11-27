@@ -23,6 +23,12 @@ pub struct Reads {
     pub draw: (u32, u32),
     /// Textures the card writes in the frame too.
     pub all: bool,
+    /// Instead of looking: slots (heap, slot) given a 2D view of a texture
+    /// (resource) that reads as 1, to see whether the draw reads them
+    /// (empty or null slots, which the look cannot find).
+    pub fill: Vec<(u32, u32, u32)>,
+    /// Only slots in this range are looked at (both included).
+    pub range: Option<(u32, u32)>,
 }
 
 /// A component mapping that gives `value` (0 or 1) in every channel.
@@ -41,7 +47,7 @@ type Candidate = (u32, u32, Slot);
 impl Player {
     /// The texture views of the heaps as the draws of version `version` see
     /// them.
-    fn texture_slots(&self, version: usize, all: bool, skipped: &mut usize) -> Vec<Candidate> {
+    fn texture_slots(&self, version: usize, all: bool, range: Option<(u32, u32)>, skipped: &mut usize) -> Vec<Candidate> {
         let mut out = Vec::new();
         for h in &self.frame.descriptor_heaps {
             if h.kind == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER.0 {
@@ -56,6 +62,9 @@ impl Player {
                 }
             }
             let mut wanted = |i: u32, s: &Slot, out: &mut Vec<Candidate>| {
+                if range.is_some_and(|(a, b)| i < a || i > b) {
+                    return;
+                }
                 if s.kind != slot::SRV || self.texture(s.res).is_none() {
                     return;
                 }
@@ -193,8 +202,53 @@ impl Player {
         if base != again {
             say("the draw's texels differ between two unchanged runs: changes may be noise".into());
         }
+        if !r.fill.is_empty() {
+            for &(h, at, res) in &r.fill {
+                let Some(o) = self.objects.get(&res) else {
+                    bail!("--fill: resource {res} is not there");
+                };
+                let rd = &self.frame.resources[o.index].desc;
+                let d = D3D12_SHADER_RESOURCE_VIEW_DESC {
+                    Format: DXGI_FORMAT(rd.format),
+                    ViewDimension: D3D12_SRV_DIMENSION_TEXTURE2D,
+                    Shader4ComponentMapping: forced(true),
+                    Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                        Texture2D: D3D12_TEX2D_SRV { MipLevels: u32::MAX, ..Default::default() },
+                    },
+                };
+                let Some((versions, step)) = self.descriptors.get(&h) else {
+                    bail!("--fill: no heap {h}");
+                };
+                let v = versions.get(version).context("no such heap version")?;
+                // SAFETY: a slot of a live heap the card is not using.
+                unsafe {
+                    let at = D3D12_CPU_DESCRIPTOR_HANDLE {
+                        ptr: v.heap.GetCPUDescriptorHandleForHeapStart().ptr + at as usize * *step as usize,
+                    };
+                    self.device.CreateShaderResourceView(&o.res, Some(&d), at);
+                }
+            }
+            let got = run(self)?;
+            say(format!("filled {:?}: the texels {}", r.fill, if got == base || got == again { "do not change" } else { "change" }));
+            for (k, &n) in mine.iter().enumerate() {
+                let t = &samples[n].spot;
+                if got[k] != base[k] {
+                    say(format!(
+                        "    point {} {} at {},{}: {} -> {}",
+                        t.point,
+                        self.called(t.res),
+                        t.x,
+                        t.y,
+                        texel_text(t.format, &base[k]),
+                        texel_text(t.format, &got[k]),
+                    ));
+                }
+            }
+            self.extra.remove(&PROBE);
+            return Ok(());
+        }
         let mut skipped = 0;
-        let all = self.texture_slots(version, r.all, &mut skipped);
+        let all = self.texture_slots(version, r.all, r.range, &mut skipped);
         say(format!(
             "{list}:{command}: {} texels of its targets; {} texture slots in version {version} of the heaps{}{}",
             mine.len(),

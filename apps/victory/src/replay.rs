@@ -215,6 +215,13 @@ pub(crate) struct Replay {
     /// With --reads: textures the card writes in the frame too.
     #[arg(long)]
     reads_all: bool,
+    /// With --reads: instead of looking, give these slots a view of a
+    /// texture that reads as 1: `<heap>:<slot>:<resource>` (repeatable).
+    #[arg(long)]
+    fill: Vec<String>,
+    /// With --reads: only heap slots in this range (`<a>..<b>`).
+    #[arg(long)]
+    reads_range: Option<String>,
     /// Take shaders from this folder where it has them (`<hash>.dxil`, by the
     /// hash the runtime names the title's shader by).
     #[arg(long)]
@@ -404,6 +411,21 @@ pub(crate) fn run(r: Replay) -> Result<()> {
             let reads = play::reads::Reads {
                 draw: pair(text, ':').with_context(|| format!("--reads {text}"))?,
                 all: r.reads_all,
+                range: match &r.reads_range {
+                    Some(t) => Some(range(t).with_context(|| format!("--reads-range {t}"))?),
+                    None => None,
+                },
+                fill: r
+                    .fill
+                    .iter()
+                    .map(|t| {
+                        let v: Vec<u32> = t.split(':').filter_map(|x| x.parse().ok()).collect();
+                        match v[..] {
+                            [h, at, res] => Ok((h, at, res)),
+                            _ => Err(anyhow::anyhow!("--fill {t}")),
+                        }
+                    })
+                    .collect::<Result<_>>()?,
             };
             return player.reads(&options, &pixels, &reads, &mut |line| println!("{line}"));
         }
