@@ -493,6 +493,9 @@ fn open(device: &ID3D12Device1, blob: Blob) -> Option<Library> {
                     VIEW[1].store(file.len, Ordering::Relaxed);
                     VIEW[0].store(file.at.Value as usize, Ordering::Relaxed);
                     LOADED_AT.store(crate::host::now_ms(), Ordering::Relaxed);
+                    if prefetch_on() {
+                        prefetch(file.at.Value as usize, file.len);
+                    }
                 }
                 return Some(Library {
                     library,
@@ -529,6 +532,36 @@ pub(crate) fn name(kind: &str, root: &[u8], code: &[&[u8]], state: &str) -> Stri
     h.finalize().to_hex()[..32].to_owned()
 }
 
+/// How this thread's host pipeline came about, over the library calls of
+/// one make ([`came_of`]): the most telling of them (a compile tells more
+/// than a load).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Came {
+    /// No library call (refused before, a pipeline on the bad list).
+    Nothing,
+    /// Loaded from the library.
+    Loaded,
+    /// Created by the driver (not in the library, or no library).
+    Compiled,
+}
+
+thread_local! {
+    /// Within [`came_of`]: what the library calls did so far.
+    static CAME: std::cell::Cell<Came> = const { std::cell::Cell::new(Came::Nothing) };
+}
+
+fn came(c: Came) {
+    CAME.with(|v| v.set(v.get().max(c)));
+}
+
+/// Runs `make` (a host pipeline's make on this thread) and says how it came
+/// about.
+pub(crate) fn came_of<R>(make: impl FnOnce() -> R) -> (R, Came) {
+    let before = CAME.replace(Came::Nothing);
+    let made = make();
+    (made, CAME.replace(before))
+}
+
 /// The pipeline named `name`: loaded from the library by `load` if it is
 /// there with the same description, else made by `create` and stored.
 pub(crate) fn pipeline(
@@ -543,6 +576,7 @@ pub(crate) fn pipeline(
     let wide = HSTRING::from(name);
     let Some(library) = library() else {
         MADE.fetch_add(1, Ordering::Relaxed);
+        came(Came::Compiled);
         return create();
     };
     let began = std::time::Instant::now();
@@ -560,6 +594,7 @@ pub(crate) fn pipeline(
     let refused = match loaded {
         Ok(pso) => {
             LOADED.fetch_add(1, Ordering::Relaxed);
+            came(Came::Loaded);
             crate::host::trail(|| {
                 let label = LABEL.with(|l| l.borrow().clone());
                 format!("pipeline library: loaded {label} in {:.1} ms", began.elapsed().as_secs_f64() * 1e3)
@@ -568,6 +603,7 @@ pub(crate) fn pipeline(
         }
         Err(e) => e,
     };
+    came(Came::Compiled);
     // Compiled outside any lock: compiles take up to seconds.
     let pso = {
         let _call = call("make", name);
@@ -753,17 +789,128 @@ pub(crate) fn slow(key: &str) -> bool {
     slow_ones().as_ref().is_some_and(|s| s.contains_key(key))
 }
 
-/// The title pipeline with `key` took `ms` to make.
-pub(crate) fn note_time(key: &str, ms: u64) {
-    if ms < SLOW_MS {
+/// Keys put on the slow list and taken off it in this run.
+pub(crate) static SLOW_ADDED: AtomicU64 = AtomicU64::new(0);
+pub(crate) static SLOW_REMOVED: AtomicU64 = AtomicU64::new(0);
+
+/// Whether the slow list holds compile times only: a load from the library
+/// neither puts a key on it nor takes one off, and a compile under
+/// [`SLOW_MS`] takes it off. The list is there for the compiles that hold
+/// every worker for tens of seconds, but any make of a second went on it,
+/// loads too, and nothing came off: 1,817 of 3,224 early keys were on it in
+/// one cache, most of them loads that met a cold page of the mapped
+/// library, and they waited behind the others in the slow queue.
+/// On by default (a fix of what is counted); `VICTORY_PIPELINE_SLOW_LIST=0`:
+/// every make of a second is added, nothing removed, as before.
+fn compiles_only() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_PIPELINE_SLOW_LIST").is_none_or(|v| v != "0"))
+}
+
+/// What a make of `ms` that came about as `came` does to the slow list:
+/// `Some(true)` adds (or raises) the key, `Some(false)` takes it off.
+fn slow_change(ms: u64, came: Came, compiles_only: bool) -> Option<bool> {
+    if !compiles_only {
+        return (ms >= SLOW_MS).then_some(true);
+    }
+    match came {
+        Came::Compiled => Some(ms >= SLOW_MS),
+        Came::Nothing | Came::Loaded => None,
+    }
+}
+
+/// The title pipeline with `key` took `ms` to make, and came about as `came`.
+pub(crate) fn note_time(key: &str, ms: u64, came: Came) {
+    let Some(add) = slow_change(ms, came, compiles_only()) else { return };
+    let mut slow = slow_ones();
+    let slow = slow.get_or_insert_default();
+    if !add {
+        if slow.remove(key).is_some() {
+            SLOW_REMOVED.fetch_add(1, Ordering::Relaxed);
+            // With the next save of the early list.
+            USED_CHANGED.store(true, Ordering::Relaxed);
+        }
         return;
     }
-    let mut slow = slow_ones();
-    let known = slow.get_or_insert_default().entry(key.to_owned()).or_insert(0);
+    let mut new = false;
+    let known = slow.entry(key.to_owned()).or_insert_with(|| {
+        new = true;
+        0
+    });
+    if new {
+        SLOW_ADDED.fetch_add(1, Ordering::Relaxed);
+    }
     if ms > *known {
         *known = ms;
         // With the next save of the early list.
         USED_CHANGED.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Whether the mapped library's file is read ahead of the loads, once, at
+/// its opening ([`prefetch`]). Off by default; `VICTORY_LIBRARY_PREFETCH=1`.
+fn prefetch_on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_LIBRARY_PREFETCH").is_some_and(|v| v == "1"))
+}
+
+/// Free physical memory below which the read ahead stops.
+const PREFETCH_MIN_FREE: u64 = 6 << 30;
+/// Read ahead in parts of this size, between which the free memory is
+/// looked at again.
+const PREFETCH_PART: usize = 64 << 20;
+
+/// The next part to read ahead of `len` bytes, `done` of them read, with
+/// `free` bytes of physical memory free: `None` once all is read or memory
+/// is short.
+fn prefetch_part(done: usize, len: usize, free: Option<u64>) -> Option<usize> {
+    if done >= len || free.is_some_and(|f| f < PREFETCH_MIN_FREE) {
+        return None;
+    }
+    Some(PREFETCH_PART.min(len - done))
+}
+
+/// Reads the mapped library's file (`len` bytes at `at`) into memory on a
+/// thread of its own, in the background mode (lowest CPU, I/O and memory
+/// priority), before the early pipelines' loads fault its pages in one at a
+/// time. The pages go to Windows' file cache (standby, at low memory
+/// priority), not to the process's working set or private bytes
+/// (`PrefetchVirtualMemory`, Remarks): a load then finds them there. It
+/// costs up to the file's size of the file cache, which Windows gives to
+/// whatever wants memory first, and a read of the whole file from the disk
+/// while the title loads; it stops when less than [`PREFETCH_MIN_FREE`] is
+/// free.
+fn prefetch(at: usize, len: usize) {
+    let work = move || {
+        use windows_sys::Win32::System::Memory::{PrefetchVirtualMemory, WIN32_MEMORY_RANGE_ENTRY};
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentProcess, GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN,
+        };
+        // SAFETY: a plain call on our own thread.
+        unsafe { SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN) };
+        let began = std::time::Instant::now();
+        let mut done = 0usize;
+        let mut free = crate::host::available_physical_ram();
+        while let Some(part) = prefetch_part(done, len, free) {
+            let range = WIN32_MEMORY_RANGE_ENTRY { VirtualAddress: (at + done) as *mut _, NumberOfBytes: part };
+            // SAFETY: a range of the view, which lives as long as the
+            // library (never dropped).
+            if unsafe { PrefetchVirtualMemory(GetCurrentProcess(), 1, &range, 0) } == 0 {
+                break;
+            }
+            done += part;
+            free = crate::host::available_physical_ram();
+        }
+        tracing::info!(
+            bytes = done,
+            of = len,
+            ms = began.elapsed().as_millis() as u64,
+            free_at_end = free,
+            "host pipeline library read ahead (VICTORY_LIBRARY_PREFETCH)"
+        );
+    };
+    if let Err(e) = std::thread::Builder::new().name("victory-library-prefetch".into()).spawn(work) {
+        tracing::warn!(error = %e, "no thread to read the host pipeline library ahead");
     }
 }
 
@@ -810,6 +957,70 @@ pub(crate) fn note_used(key: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only compiles go on the slow list or come off it; with the switch
+    /// off, as before, any make of a second goes on and nothing comes off.
+    #[test]
+    fn the_slow_list_counts_compiles_only() {
+        assert_eq!(slow_change(SLOW_MS, Came::Compiled, true), Some(true));
+        assert_eq!(slow_change(SLOW_MS - 1, Came::Compiled, true), Some(false));
+        for came in [Came::Loaded, Came::Nothing] {
+            assert_eq!(slow_change(5 * SLOW_MS, came, true), None, "{came:?}");
+            assert_eq!(slow_change(1, came, true), None, "{came:?}");
+        }
+        assert_eq!(slow_change(SLOW_MS, Came::Loaded, false), Some(true));
+        assert_eq!(slow_change(SLOW_MS - 1, Came::Compiled, false), None);
+    }
+
+    #[test]
+    fn a_slow_key_that_compiles_quickly_comes_off_the_list() {
+        let key = "slow-list-test-key";
+        let before = SLOW_REMOVED.load(Ordering::Relaxed);
+        note_time(key, 2 * SLOW_MS, Came::Compiled);
+        assert!(slow(key));
+        // A quick load says nothing of the compile.
+        note_time(key, 10, Came::Loaded);
+        assert!(slow(key));
+        note_time(key, 10, Came::Compiled);
+        assert!(!slow(key));
+        assert!(SLOW_REMOVED.load(Ordering::Relaxed) > before);
+        // Loads alone never put one on.
+        note_time(key, 5 * SLOW_MS, Came::Loaded);
+        assert!(!slow(key));
+    }
+
+    /// What a make's library calls did, the most telling of them, kept
+    /// apart from an enclosing make's.
+    #[test]
+    fn came_of_tells_the_most_telling_call() {
+        let ((), c) = came_of(|| {
+            came(Came::Loaded);
+            came(Came::Compiled);
+            came(Came::Loaded);
+        });
+        assert_eq!(c, Came::Compiled);
+        let ((), outer) = came_of(|| {
+            came(Came::Loaded);
+            let ((), inner) = came_of(|| came(Came::Compiled));
+            assert_eq!(inner, Came::Compiled);
+        });
+        assert_eq!(outer, Came::Loaded);
+        assert_eq!(came_of(|| ()).1, Came::Nothing);
+    }
+
+    /// The read ahead goes in parts, the last one short, and stops when
+    /// memory is short (a free amount not known does not stop it).
+    #[test]
+    fn the_read_ahead_goes_in_parts_while_memory_is_free() {
+        let plenty = Some(PREFETCH_MIN_FREE);
+        let len = 2 * PREFETCH_PART + 5;
+        assert_eq!(prefetch_part(0, len, plenty), Some(PREFETCH_PART));
+        assert_eq!(prefetch_part(PREFETCH_PART, len, None), Some(PREFETCH_PART));
+        assert_eq!(prefetch_part(2 * PREFETCH_PART, len, plenty), Some(5));
+        assert_eq!(prefetch_part(len, len, plenty), None);
+        assert_eq!(prefetch_part(0, len, Some(PREFETCH_MIN_FREE - 1)), None);
+        assert_eq!(prefetch_part(0, 0, plenty), None);
+    }
 
     #[test]
     fn names_change_with_what_goes_into_the_pipeline() {

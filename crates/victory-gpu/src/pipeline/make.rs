@@ -36,6 +36,8 @@ pub(crate) struct Pending {
     queue_state: AtomicU8,
     /// Taken by a worker from [`Queue::slow`].
     was_slow: AtomicBool,
+    /// Started at the title's creation of it and not made yet ([`early`]).
+    started_early: AtomicBool,
     made: OnceLock<Option<HostPipeline>>,
     done: (Mutex<()>, Condvar),
     /// What identifies it across runs (shader containers and state), and
@@ -66,6 +68,7 @@ impl Pending {
             graphics,
             queue_state: AtomicU8::new(NOT_QUEUED),
             was_slow: AtomicBool::new(false),
+            started_early: AtomicBool::new(false),
             made: OnceLock::new(),
             done: (Mutex::new(()), Condvar::new()),
             key: key.finalize().to_hex()[..32].to_owned(),
@@ -78,22 +81,26 @@ impl Pending {
     }
 
     fn make(&self) {
+        use super::library::Came;
         // Not through `OnceLock::get_or_init`: a worker the driver's compiler
         // crashed under stays inside the call for good (see [`guard_start`]),
         // and anyone else asking would wait for it forever.
         if self.made.get().is_none() {
-            let made = if is_bad_key(&self.key) {
+            let (made, came) = if is_bad_key(&self.key) {
                 SKIPPED_BAD.fetch_add(1, Ordering::Relaxed);
                 tracing::warn!(key = self.key, shaders = ?self.shaders, "not made: the driver's compiler crashed on it before");
-                None
+                (None, Came::Nothing)
             } else {
                 let _building = crate::timeline::span("pipeline: build a host pipeline");
                 let began = Instant::now();
-                let made = HostPipeline::new(&self.shaders, self.graphics.as_deref());
-                super::library::note_time(&self.key, began.elapsed().as_millis() as u64);
-                made
+                let (made, came) =
+                    super::library::came_of(|| HostPipeline::new(&self.shaders, self.graphics.as_deref()));
+                super::library::note_time(&self.key, began.elapsed().as_millis() as u64, came);
+                (made, came)
             };
-            let _ = self.made.set(made);
+            if self.made.set(made).is_ok() {
+                self.early_done(came);
+            }
         }
         self.notify_waiters();
     }
@@ -106,6 +113,69 @@ impl Pending {
         let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
         done.notify_all();
     }
+
+    /// An early pipeline ([`early`]) is made (or given up): counted, and the
+    /// line logged once none is left.
+    fn early_done(&self, came: super::library::Came) {
+        if !self.started_early.swap(false, Ordering::Relaxed) {
+            return;
+        }
+        EARLY_CAME[early_came_at(came)].fetch_add(1, Ordering::Relaxed);
+        if EARLY_LEFT.fetch_sub(1, Ordering::Relaxed) == 1 {
+            early_drained();
+        }
+    }
+}
+
+/// Where in [`EARLY_CAME`] an early pipeline that came about as `came` is
+/// counted.
+fn early_came_at(came: super::library::Came) -> usize {
+    use super::library::Came;
+    match came {
+        Came::Loaded => 0,
+        Came::Compiled => 1,
+        Came::Nothing => 2,
+    }
+}
+
+/// Early pipelines ([`early`]) not made yet; made since the start: loaded
+/// from the library, compiled, neither (refused, left out); when the first
+/// was started (`crate::host::now_ms`; `u64::MAX`: none yet).
+static EARLY_LEFT: AtomicU64 = AtomicU64::new(0);
+static EARLY_CAME: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+static EARLY_BEGAN: AtomicU64 = AtomicU64::new(u64::MAX);
+/// Early pipelines put in [`Queue::slow`] (being on the slow list).
+static SLOW_QUEUED: AtomicU64 = AtomicU64::new(0);
+/// The early pipelines made when the line was last logged.
+static EARLY_LOGGED: AtomicU64 = AtomicU64::new(0);
+
+/// Whether "early pipelines all made" is logged with `total` made, `logged`
+/// of them made at the last line: after 10 or more since.
+fn early_line_due(total: u64, logged: u64) -> bool {
+    total >= logged + 10
+}
+
+/// No early pipeline is left to make: logged after 10 or more since the
+/// last line.
+fn early_drained() {
+    use super::library::{SLOW_ADDED, SLOW_REMOVED};
+    let came: [u64; 3] = std::array::from_fn(|i| EARLY_CAME[i].load(Ordering::Relaxed));
+    let total = came.iter().sum::<u64>();
+    if !early_line_due(total, EARLY_LOGGED.load(Ordering::Relaxed)) {
+        return;
+    }
+    EARLY_LOGGED.store(total, Ordering::Relaxed);
+    let began = EARLY_BEGAN.load(Ordering::Relaxed);
+    tracing::info!(
+        loaded = came[0],
+        compiled = came[1],
+        neither = came[2],
+        slow_queued = SLOW_QUEUED.load(Ordering::Relaxed),
+        slow_list_added = SLOW_ADDED.load(Ordering::Relaxed),
+        slow_list_removed = SLOW_REMOVED.load(Ordering::Relaxed),
+        ms_since_first_early = crate::host::now_ms().saturating_sub(began),
+        "early pipelines all made"
+    );
 }
 
 /// Pipelines not made for being on the list of those the driver's compiler
@@ -315,7 +385,9 @@ fn lost(slot: usize) {
             let _ = writeln!(f, "{}", super::known::format_bad_entry(&p.key, &fingerprint, &reason));
         }
     }
-    let _ = p.made.set(None);
+    if p.made.set(None).is_ok() {
+        p.early_done(super::library::Came::Nothing);
+    }
     if p.was_slow.swap(false, Ordering::Relaxed) {
         let mut queue = QUEUE.lock().unwrap_or_else(|e| e.into_inner());
         queue.slow_now = queue.slow_now.saturating_sub(1);
@@ -422,6 +494,10 @@ pub(crate) fn now(p: &Arc<Pending>) -> bool {
 pub(crate) fn early(p: &Arc<Pending>) {
     if !p.shaders.is_empty() && super::library::wanted_early(&p.key) {
         super::library::EARLY.fetch_add(1, Ordering::Relaxed);
+        let _ = EARLY_BEGAN.compare_exchange(u64::MAX, crate::host::now_ms(), Ordering::Relaxed, Ordering::Relaxed);
+        if !p.started_early.swap(true, Ordering::Relaxed) {
+            EARLY_LEFT.fetch_add(1, Ordering::Relaxed);
+        }
         start(p, EARLY);
     }
 }
@@ -555,7 +631,12 @@ impl Queue {
     /// Queues an unrequested pipeline or promotes one queued at creation.
     /// Returns whether it is new to the queue, or `None` if nothing changed.
     fn push(&mut self, p: &Arc<Pending>, priority: u8) -> Option<bool> {
-        self.push_as(p, priority, slow_limit() != usize::MAX && super::library::slow(&p.key))
+        let slow = slow_limit() != usize::MAX && super::library::slow(&p.key);
+        let pushed = self.push_as(p, priority, slow);
+        if slow && priority == EARLY && pushed.is_some() {
+            SLOW_QUEUED.fetch_add(1, Ordering::Relaxed);
+        }
+        pushed
     }
 
     fn push_as(&mut self, p: &Arc<Pending>, priority: u8, slow: bool) -> Option<bool> {
@@ -776,6 +857,30 @@ mod tests {
             std::thread::yield_now();
         }
         assert!(matches!(p.made.get(), Some(None)));
+    }
+
+    /// Early pipelines are counted by how they came about, each once, and
+    /// the line is logged after ten or more since the last.
+    #[test]
+    fn early_pipelines_are_counted_once_by_how_they_came() {
+        use super::super::library::Came;
+        assert_eq!(early_came_at(Came::Loaded), 0);
+        assert_eq!(early_came_at(Came::Compiled), 1);
+        assert_eq!(early_came_at(Came::Nothing), 2);
+        assert!(!early_line_due(9, 0));
+        assert!(early_line_due(10, 0));
+        assert!(!early_line_due(15, 10));
+
+        let p = Pending::new(Vec::new(), None);
+        // Not started early: not counted.
+        let before = EARLY_CAME[1].load(Ordering::Relaxed);
+        p.early_done(Came::Compiled);
+        assert_eq!(EARLY_CAME[1].load(Ordering::Relaxed), before);
+        p.started_early.store(true, Ordering::Relaxed);
+        EARLY_LEFT.fetch_add(1, Ordering::Relaxed);
+        p.early_done(Came::Compiled);
+        assert!(!p.started_early.load(Ordering::Relaxed));
+        assert!(EARLY_CAME[1].load(Ordering::Relaxed) > before);
     }
 
     /// A pipeline the compiler crashed on is not made again: no compile.
