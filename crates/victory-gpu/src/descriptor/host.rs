@@ -413,15 +413,34 @@ fn note_before(index: u32, was: u64, by: &'static str) {
 /// A 1x1 gray texture, in the place of one that is not there yet.
 fn neutral() -> Option<&'static ID3D12Resource> {
     static TEXTURE: std::sync::OnceLock<Option<ID3D12Resource>> = std::sync::OnceLock::new();
-    TEXTURE
-        .get_or_init(|| {
+    TEXTURE.get_or_init(|| solid([0x80; 4])).as_ref()
+}
+
+/// A 1x1 magenta texture: with `VICTORY_PLACEHOLDER_MAGENTA=1` (diagnostics),
+/// placed texture views the title made of no memory (address 0) show it
+/// instead of a null view, so what reads them shows on the screen.
+fn magenta() -> Option<&'static ID3D12Resource> {
+    static TEXTURE: std::sync::OnceLock<Option<ID3D12Resource>> = std::sync::OnceLock::new();
+    TEXTURE.get_or_init(|| solid([0xff, 0x00, 0xff, 0xff])).as_ref()
+}
+
+/// Whether [`magenta`] stands in for placed texture views of no memory.
+fn placeholder_magenta() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_PLACEHOLDER_MAGENTA").is_some_and(|v| v == "1"))
+}
+
+/// A 1x1 RGBA8 texture of one colour, uploaded and waited for.
+fn solid(rgba: [u8; 4]) -> Option<ID3D12Resource> {
             let host = host()?;
             let device = &host.device;
             let (from, data) = host.upload_buffer(256)?;
             // SAFETY: the buffer's mapping; plain creation and recording,
             // waited for before what it names goes.
             unsafe {
-                std::ptr::write_bytes(data, 0x80, 256);
+                for texel in 0..64 {
+                    std::ptr::copy_nonoverlapping(rgba.as_ptr(), data.add(4 * texel), 4);
+                }
                 let mut made: Option<ID3D12Resource> = None;
                 device
                     .CreateCommittedResource(
@@ -478,13 +497,16 @@ fn neutral() -> Option<&'static ID3D12Resource> {
                 fence.SetEventOnCompletion(1, windows::Win32::Foundation::HANDLE::default()).ok()?;
                 Some(made)
             }
-        })
-        .as_ref()
 }
 
 /// Makes the descriptor of [`neutral`] for a slot of `view` at `at`, if the
 /// view is a 2D texture's or an array's; else a null one of its kind.
 fn neutral_for(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) -> Option<ID3D12Resource> {
+    stand_in_for(view, at, neutral())
+}
+
+/// [`neutral_for`] with another 1x1 texture.
+fn stand_in_for(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE, texture: Option<&'static ID3D12Resource>) -> Option<ID3D12Resource> {
     const TEXTURE2D: u32 = 4;
     const TEXTURE2D_ARRAY: u32 = 5;
     let dimension = match view {
@@ -514,7 +536,7 @@ fn neutral_for(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) -> Option<ID3D12Res
             return None;
         }
     };
-    let (Some(texture), Some(host)) = (neutral(), host()) else {
+    let (Some(texture), Some(host)) = (texture, host()) else {
         null_for(view, at);
         return None;
     };
@@ -4697,6 +4719,10 @@ fn make_twinned(
             }
             const BUFFER: u32 = 1;
             if resource[0] != BUFFER {
+                // (Diagnostics: a view of no memory shows magenta.)
+                if !unordered && placeholder_magenta() && desc[10] == 0 && desc[11] == 0 {
+                    return Some(stand_in_for(view, at, magenta()));
+                }
                 // shortcut: unordered access to a texture the title placed
                 // itself is not mirrored; give it a resource as shader
                 // views of such textures get when a dispatch writes one.
