@@ -51,6 +51,9 @@ export SDL_JOYSTICK_HIDAPI="${SDL_JOYSTICK_HIDAPI:-1}" PROTON_DISABLE_HIDRAW="${
 
 if [ -n "${VICTORY_FSR_4K:-}" ] && [ "${VICTORY_FSR_4K}" != 0 ]; then
     export VICTORY_FSR_4K
+    # Proton's amdxc64.dll hands the SDK AMD's FSR 4 (amdxcffx64.dll) only with FSR4_UPGRADE set;
+    # without it the SDK offers FSR 3.1.5 only.
+    export FSR4_UPGRADE="${FSR4_UPGRADE:-1}"
     export VICTORY_FIDELITYFX_DIR="${VICTORY_FIDELITYFX_DIR:-Z:$(printf '%s' "$VICTORY_DIR/fidelityfx" | tr / '\\')}"
     GAMESCOPE_OUT_W="${GAMESCOPE_OUT_W:-1600}" GAMESCOPE_OUT_H="${GAMESCOPE_OUT_H:-900}"
     GAMESCOPE_W="${GAMESCOPE_W:-3840}" GAMESCOPE_H="${GAMESCOPE_H:-2160}"

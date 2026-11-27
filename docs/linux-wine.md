@@ -285,6 +285,9 @@ branch, so these are hand ports, each naming its commit. What was looked at and 
 and FSR 4.1.2 itself from AMD's driver part `amdxcffx64.dll` (in AMD's Windows driver package; carries
 `4.1.2`/`FSR4`) in the prefix's `system32`, as Proton's own FSR 4 upgrade does. The title then draws for
 3840x2160, rendering 2560x1440, 2259x1270 or 1920x1080 inside.
+Proton's `amdxc64.dll` hands the SDK AMD's FSR 4 only with `FSR4_UPGRADE` set (`run.sh` sets it with
+`VICTORY_FSR_4K`): without it the SDK offered FSR 3.1.5 only (run 92); with it "4.1.2 *" was selected and its
+context made on the host (run 93, `WINEDEBUG=+amdxc`: "Replaced FSR3 with FSR4!"). Picture not yet seen.
 
 ## Ported from `speed-trial`
 
