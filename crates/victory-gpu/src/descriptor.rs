@@ -1594,6 +1594,106 @@ pub(crate) extern "system" fn create_placed_srv(
             }
         }
         record(handle, View::Placed(false, resource, desc));
+        #[cfg(all(windows, feature = "diagnostics"))]
+        if resource[0] != 1 && desc[10] == 0 && desc[11] == 0 {
+            placeholders::made(handle);
+        }
+    }
+}
+
+/// Diagnostics: what becomes of the slots the title made a placed texture
+/// view of no memory in (address 0; ~11 % of placed texture views in run 79,
+/// and a car's panels read such views close up and stay dark). Each such
+/// slot is looked at again every few seconds: our record still there (the
+/// title never gave the view its memory), another record of ours (a view
+/// made or copied there: what it shows), or other bytes (the title wrote the
+/// slot itself, as on the console: they are logged).
+#[cfg(all(windows, feature = "diagnostics"))]
+mod placeholders {
+    use super::{VIEW_TAG, View};
+    use std::sync::Mutex;
+
+    /// Slots watched: (slot, the record written, when made).
+    static SLOTS: Mutex<Vec<(u64, [u32; 3], std::time::Instant)>> = Mutex::new(Vec::new());
+    const MAX: usize = 8192;
+
+    pub(super) fn made(handle: u64) {
+        let Some(words) = super::record_at(handle) else { return };
+        let mut slots = SLOTS.lock().unwrap_or_else(|e| e.into_inner());
+        if slots.len() < MAX {
+            slots.push((handle, words, std::time::Instant::now()));
+        }
+        if slots.len() == 1 {
+            std::thread::Builder::new()
+                .name("victory-placeholders".into())
+                .spawn(watch)
+                .ok();
+        }
+    }
+
+    fn watch() {
+        let mut said_other = 0u32;
+        let mut said_view = 0u32;
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            let slots: Vec<_> = SLOTS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let (mut same, mut ours, mut ours_with_memory, mut other, mut unreadable) = (0u32, 0u32, 0u32, 0u32, 0u32);
+            let mut oldest_same = 0u64;
+            for &(handle, written, at) in &slots {
+                let mut bytes = [0u8; 32];
+                if !crate::host::read_into(handle as *const u8, &mut bytes) {
+                    unreadable += 1;
+                    continue;
+                }
+                let w = |k: usize| u32::from_le_bytes(bytes[4 * k..4 * k + 4].try_into().unwrap_or_default());
+                let now = [w(0), w(1), w(2)];
+                if now == written {
+                    same += 1;
+                    oldest_same = oldest_same.max(at.elapsed().as_secs());
+                } else if now[0] == VIEW_TAG {
+                    ours += 1;
+                    let view = super::view_at(now[1], now[2]);
+                    let memory = match &view {
+                        Some(View::Placed(_, _, d)) => d[10] != 0 || d[11] != 0,
+                        Some(_) => true,
+                        None => false,
+                    };
+                    if memory {
+                        ours_with_memory += 1;
+                    }
+                    if said_view < 16 {
+                        said_view += 1;
+                        tracing::warn!(
+                            slot = format_args!("{handle:#x}"),
+                            after_ms = at.elapsed().as_millis() as u64,
+                            ?view,
+                            "placeholder slot now holds another view of ours"
+                        );
+                    }
+                } else {
+                    other += 1;
+                    if said_other < 32 {
+                        said_other += 1;
+                        tracing::warn!(
+                            slot = format_args!("{handle:#x}"),
+                            after_ms = at.elapsed().as_millis() as u64,
+                            bytes = format_args!("{bytes:02x?}"),
+                            "placeholder slot written by the title with bytes that are no record of ours"
+                        );
+                    }
+                }
+            }
+            tracing::info!(
+                watched = slots.len(),
+                still_placeholder = same,
+                oldest_placeholder_s = oldest_same,
+                our_other_view = ours,
+                of_them_with_memory = ours_with_memory,
+                title_bytes = other,
+                unreadable,
+                "placeholder texture views (address 0): what their slots hold now"
+            );
+        }
     }
 }
 
