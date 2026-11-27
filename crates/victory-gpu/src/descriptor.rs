@@ -1579,6 +1579,20 @@ pub(crate) extern "system" fn create_placed_srv(
     handle: u64,
 ) {
     if let (Some(resource), Some(desc)) = (words(resource), words(desc)) {
+        #[cfg(feature = "diagnostics")]
+        if resource[0] != 1 {
+            static MADE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            static EMPTY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let made = MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            let empty = if desc[10] == 0 && desc[11] == 0 {
+                EMPTY.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+            } else {
+                EMPTY.load(std::sync::atomic::Ordering::Relaxed)
+            };
+            if made <= 2 || made.is_power_of_two() {
+                tracing::warn!(made, empty, ?resource, ?desc, "placed texture SRV");
+            }
+        }
         record(handle, View::Placed(false, resource, desc));
     }
 }
@@ -1590,6 +1604,16 @@ pub(crate) extern "system" fn create_placed_uav(
     handle: u64,
 ) {
     if let (Some(resource), Some(desc)) = (words(resource), words(desc)) {
+        #[cfg(feature = "diagnostics")]
+        {
+            static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            if resource[0] != 1 {
+                let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if n < 24 {
+                    tracing::warn!(n, "placed UAV probe: resource {resource:?} view {desc:?}");
+                }
+            }
+        }
         record(handle, View::Placed(true, resource, desc));
     }
 }
@@ -2157,3 +2181,6 @@ mod tests {
         assert_ne!(slot::<extern "system" fn(This) -> u64>(h, 0x48)(h), address);
     }
 }
+
+
+
