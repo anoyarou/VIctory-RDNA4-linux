@@ -1596,7 +1596,7 @@ pub(crate) extern "system" fn create_placed_srv(
         record(handle, View::Placed(false, resource, desc));
         #[cfg(all(windows, feature = "diagnostics"))]
         if resource[0] != 1 && desc[10] == 0 && desc[11] == 0 {
-            placeholders::made(handle);
+            placeholders::made(handle, resource[4], resource[6], resource[8]);
         }
     }
 }
@@ -1613,66 +1613,69 @@ mod placeholders {
     use super::{VIEW_TAG, View};
     use std::sync::Mutex;
 
-    /// Slots watched: (slot, the record written, when made).
-    static SLOTS: Mutex<Vec<(u64, [u32; 3], std::time::Instant)>> = Mutex::new(Vec::new());
-    const MAX: usize = 8192;
+    /// Slots watched: (slot, the record written, when made, width, height,
+    /// format). Resolved slots are let go, so placeholders made at any time
+    /// are watched (at most [`MAX`] at once).
+    type Slot = (u64, [u32; 3], std::time::Instant, u32, u32, u32);
+    static SLOTS: Mutex<Vec<Slot>> = Mutex::new(Vec::new());
+    static DROPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    const MAX: usize = 16384;
 
-    pub(super) fn made(handle: u64) {
+    pub(super) fn made(handle: u64, width: u32, height: u32, format: u32) {
         let Some(words) = super::record_at(handle) else { return };
         let mut slots = SLOTS.lock().unwrap_or_else(|e| e.into_inner());
+        // A slot made again keeps one entry, the newest.
+        slots.retain(|s| s.0 != handle);
         if slots.len() < MAX {
-            slots.push((handle, words, std::time::Instant::now()));
+            slots.push((handle, words, std::time::Instant::now(), width, height, format));
+        } else {
+            DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        if slots.len() == 1 {
-            std::thread::Builder::new()
-                .name("victory-placeholders".into())
-                .spawn(watch)
-                .ok();
-        }
+        static STARTED: std::sync::Once = std::sync::Once::new();
+        STARTED.call_once(|| {
+            std::thread::Builder::new().name("victory-placeholders".into()).spawn(watch).ok();
+        });
     }
 
     fn watch() {
         let mut said_other = 0u32;
-        let mut said_view = 0u32;
+        let (mut resolved, mut reused) = (0u64, 0u64);
         loop {
             std::thread::sleep(std::time::Duration::from_secs(5));
-            let slots: Vec<_> = SLOTS.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            let (mut same, mut ours, mut ours_with_memory, mut other, mut unreadable) = (0u32, 0u32, 0u32, 0u32, 0u32);
-            let mut oldest_same = 0u64;
-            for &(handle, written, at) in &slots {
+            let slots: Vec<Slot> = SLOTS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let mut gone = std::collections::HashSet::new();
+            // Stuck ones by (width, height, format): count, oldest (s), made in the last 5 s.
+            let mut stuck: std::collections::BTreeMap<(u32, u32, u32), (u32, u64, u32)> = Default::default();
+            let mut oldest = 0u64;
+            for &(handle, written, at, width, height, format) in &slots {
                 let mut bytes = [0u8; 32];
                 if !crate::host::read_into(handle as *const u8, &mut bytes) {
-                    unreadable += 1;
+                    gone.insert(handle);
                     continue;
                 }
                 let w = |k: usize| u32::from_le_bytes(bytes[4 * k..4 * k + 4].try_into().unwrap_or_default());
                 let now = [w(0), w(1), w(2)];
                 if now == written {
-                    same += 1;
-                    oldest_same = oldest_same.max(at.elapsed().as_secs());
+                    let age = at.elapsed().as_secs();
+                    oldest = oldest.max(age);
+                    let e = stuck.entry((width, height, format)).or_default();
+                    e.0 += 1;
+                    e.1 = e.1.max(age);
+                    if age < 5 {
+                        e.2 += 1;
+                    }
                 } else if now[0] == VIEW_TAG {
-                    ours += 1;
-                    let view = super::view_at(now[1], now[2]);
-                    let memory = match &view {
+                    gone.insert(handle);
+                    let memory = match super::view_at(now[1], now[2]) {
                         Some(View::Placed(_, _, d)) => d[10] != 0 || d[11] != 0,
                         Some(_) => true,
                         None => false,
                     };
-                    if memory {
-                        ours_with_memory += 1;
-                    }
-                    if said_view < 16 {
-                        said_view += 1;
-                        tracing::warn!(
-                            slot = format_args!("{handle:#x}"),
-                            after_ms = at.elapsed().as_millis() as u64,
-                            ?view,
-                            "placeholder slot now holds another view of ours"
-                        );
-                    }
+                    if memory { resolved += 1 } else { reused += 1 }
                 } else {
-                    other += 1;
-                    if said_other < 32 {
+                    gone.insert(handle);
+                    reused += 1;
+                    if said_other < 16 {
                         said_other += 1;
                         tracing::warn!(
                             slot = format_args!("{handle:#x}"),
@@ -1683,15 +1686,23 @@ mod placeholders {
                     }
                 }
             }
+            SLOTS.lock().unwrap_or_else(|e| e.into_inner()).retain(|s| !gone.contains(&s.0));
+            let still: u32 = stuck.values().map(|e| e.0).sum();
+            let mut by_count: Vec<_> = stuck.into_iter().collect();
+            by_count.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+            by_count.truncate(8);
+            let top: Vec<String> = by_count
+                .iter()
+                .map(|((w, h, f), (n, age, new))| format!("{w}x{h}f{f}: {n} (oldest {age} s, {new} new)"))
+                .collect();
             tracing::info!(
-                watched = slots.len(),
-                still_placeholder = same,
-                oldest_placeholder_s = oldest_same,
-                our_other_view = ours,
-                of_them_with_memory = ours_with_memory,
-                title_bytes = other,
-                unreadable,
-                "placeholder texture views (address 0): what their slots hold now"
+                still_placeholder = still,
+                oldest_s = oldest,
+                resolved_with_memory = resolved,
+                reused_otherwise = reused,
+                not_watched = DROPPED.load(std::sync::atomic::Ordering::Relaxed),
+                stuck = ?top,
+                "placeholder texture views (address 0): stuck by size and format; resolved and reused since the start"
             );
         }
     }
