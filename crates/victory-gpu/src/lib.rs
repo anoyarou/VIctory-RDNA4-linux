@@ -31,6 +31,8 @@ mod compose;
 pub(crate) mod critical;
 pub mod console;
 mod wc;
+#[cfg(windows)]
+mod census;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod copystat;
 #[cfg(all(windows, feature = "diagnostics"))]
