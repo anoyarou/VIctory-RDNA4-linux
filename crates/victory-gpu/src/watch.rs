@@ -712,10 +712,250 @@ fn spread_each<T: Send>(n: usize, each: impl Fn(usize) -> T + Sync) -> Vec<T> {
     out.into_iter().filter_map(|m| m.into_inner().unwrap_or_else(|e| e.into_inner())).collect()
 }
 
+/// Whether the kernel keeps write watches of the title's view memory too
+/// (`VICTORY_SECTION_WATCH`, read here; unset: found out once by
+/// [`section_watch_probe`], `0`: never). Wine with `WINE_SECTION_WRITEWATCH=1`
+/// (our ntdll patch, branch `section-writewatch` of Proton's Wine) answers
+/// `GetWriteWatch` for writable views of sections without a file, by the
+/// kernel's write-protect bits: a write there is noted by the kernel, with no
+/// fault, no handler and no protection change, where the guards cost 40.7 ms
+/// of waiting and 17.3 ms of protection changes a frame (run 94,
+/// `CPU-BOTTLENECK-ANALYSIS.md` option S1). Windows refuses such askings
+/// (the probe fails there and nothing changes).
+///
+/// The kernel's bits are those of one address: a write through another view
+/// of the page is not seen at this one. With this on, [`kernel_written`] also
+/// asks a page's other title views ([`elsewhere`]) and tells what it finds at
+/// both addresses.
+pub(crate) fn section_watch() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| match std::env::var("VICTORY_SECTION_WATCH").as_deref().map(str::trim) {
+        Ok("0") => false,
+        _ => section_watch_probe(),
+    })
+}
+
+/// Maps a section of one 64 KiB page twice and asks the write watch of both
+/// views: on only if it answers for a view, sees a write through it, and
+/// (as the kernel's bits are per address) not through the other.
+fn section_watch_probe() -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Memory::{
+        CreateFileMappingW, FILE_MAP_WRITE, GetWriteWatch, MapViewOfFile, PAGE_READWRITE, UnmapViewOfFile,
+    };
+    const SIZE: usize = 64 << 10;
+    const WRITE_WATCH_FLAG_RESET: u32 = 1;
+    // SAFETY: a pagefile-backed section of our own, two views of it, unmapped
+    // and closed before returning; the answer buffer holds 16 entries.
+    unsafe {
+        let section =
+            CreateFileMappingW(INVALID_HANDLE_VALUE, std::ptr::null(), PAGE_READWRITE, 0, SIZE as u32, std::ptr::null());
+        if section.is_null() {
+            return false;
+        }
+        let a = MapViewOfFile(section, FILE_MAP_WRITE, 0, 0, SIZE);
+        let b = MapViewOfFile(section, FILE_MAP_WRITE, 0, 0, SIZE);
+        let ask = |at: *mut std::ffi::c_void| -> Option<usize> {
+            let mut found = [0usize; 16];
+            let (mut count, mut granularity) = (found.len(), 0u32);
+            let failed =
+                GetWriteWatch(WRITE_WATCH_FLAG_RESET, at, SIZE, found.as_mut_ptr().cast(), &mut count, &mut granularity) != 0;
+            (!failed).then_some(count)
+        };
+        let mut result = (None, None, None);
+        if !a.Value.is_null() && !b.Value.is_null() {
+            let first = ask(a.Value);
+            a.Value.cast::<u8>().write_volatile(1);
+            let through_a = ask(a.Value);
+            b.Value.cast::<u8>().add(4096).write_volatile(1);
+            let a_of_b = ask(a.Value);
+            result = (first.and(through_a), a_of_b, ask(b.Value));
+        }
+        for view in [a, b] {
+            if !view.Value.is_null() {
+                UnmapViewOfFile(view);
+            }
+        }
+        CloseHandle(section);
+        let on = matches!(result, (Some(1), Some(0), Some(1)));
+        tracing::info!(
+            answered = result.0.is_some(),
+            seen_through_the_other_view = ?result.1,
+            on,
+            "write watch of section views (VICTORY_SECTION_WATCH): {}",
+            if on {
+                "the kernel keeps it; views are asked, not guarded, with their pages' other views"
+            } else {
+                "not kept (Windows, or Wine without WINE_SECTION_WRITEWATCH=1): guards as before"
+            }
+        );
+        on
+    }
+}
+
+/// [`kernel_written_one`], and with [`section_watch`] the other title views
+/// of its pages asked too: a page written through one of them is told
+/// written here and there (both are in the answer, so the caller notes both;
+/// the asking reset that view's bits). The caller holds the range
+/// ([`Asking`]); the other views are asked without holding theirs: an asking
+/// of theirs at the same time finds the write or a later one, and every note
+/// only goes up.
+fn kernel_written(first: usize, last: usize) -> Option<Vec<(usize, u16)>> {
+    let mut pages = kernel_written_one(first, last)?;
+    if section_watch() {
+        // (Another view's page, this range's page), in order.
+        let mut pairs: Vec<(usize, usize)> = Vec::new();
+        for (page, others) in elsewhere(first * PAGE, (last - first) * PAGE) {
+            pairs.extend(others.into_iter().map(|other| (other / PAGE, page / PAGE)));
+        }
+        if !pairs.is_empty() {
+            pairs.sort_unstable();
+            pairs.dedup();
+            let mut found: Vec<(usize, u16)> = Vec::new();
+            let mut i = 0;
+            while i < pairs.len() {
+                // A run of the other views' pages, one asking.
+                let mut k = i + 1;
+                while k < pairs.len() && pairs[k].0 <= pairs[k - 1].0 + 1 {
+                    k += 1;
+                }
+                // (A view gone since, or not write-watched: nothing more is
+                // known there, as with the guards' views that could not be
+                // covered; counted.)
+                match kernel_written_one(pairs[i].0, pairs[k - 1].0 + 1) {
+                    Some(written) => {
+                        for (other, parts) in written {
+                            found.push((other, parts));
+                            for &(_, ours) in pairs[i..k].iter().filter(|p| p.0 == other) {
+                                found.push((ours, parts));
+                            }
+                        }
+                    }
+                    None => section_count(SW_ALIAS_REFUSED, 1),
+                }
+                section_count(SW_ALIAS_ASKINGS, 1);
+                i = k;
+            }
+            section_count(SW_ALIAS_FOUND, found.len() as u64);
+            pages.extend(found);
+            pages.sort_unstable_by_key(|p| p.0);
+            let mut merged: Vec<(usize, u16)> = Vec::with_capacity(pages.len());
+            for (page, parts) in pages {
+                match merged.last_mut() {
+                    Some((last, p)) if *last == page => *p |= parts,
+                    _ => merged.push((page, parts)),
+                }
+            }
+            pages = merged;
+        }
+    }
+    #[cfg(feature = "diagnostics")]
+    audit(first, last, &pages);
+    section_log();
+    Some(pages)
+}
+
+/// Counters of [`section_watch`] since the last line: askings of other
+/// views, those refused, pages found written through them; pages the audit
+/// looked at, and those whose bytes changed with no write told
+/// (`VICTORY_WATCH_AUDIT`).
+static SECTION_COUNTS: [std::sync::atomic::AtomicU64; 5] = [const { std::sync::atomic::AtomicU64::new(0) }; 5];
+const SW_ALIAS_ASKINGS: usize = 0;
+const SW_ALIAS_REFUSED: usize = 1;
+const SW_ALIAS_FOUND: usize = 2;
+const SW_AUDITED: usize = 3;
+const SW_MISSED: usize = 4;
+
+fn section_count(what: usize, n: u64) {
+    SECTION_COUNTS[what].fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Every 5 s: the counters above, if anything was counted.
+fn section_log() {
+    static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    let Ok(mut last) = LAST.try_lock() else { return };
+    let now = std::time::Instant::now();
+    if last.is_some_and(|t| now.duration_since(t).as_secs() < 5) {
+        return;
+    }
+    let was = last.replace(now);
+    let n: [u64; 5] = std::array::from_fn(|i| SECTION_COUNTS[i].swap(0, std::sync::atomic::Ordering::Relaxed));
+    if was.is_none() || n.iter().all(|&c| c == 0) {
+        return;
+    }
+    tracing::info!(
+        "write watch of section views, last 5 s: {} askings of pages' other views ({} refused), {} pages found \
+         written through them; audit (VICTORY_WATCH_AUDIT): {} pages looked at, {} changed with no write told",
+        n[SW_ALIAS_ASKINGS],
+        n[SW_ALIAS_REFUSED],
+        n[SW_ALIAS_FOUND],
+        n[SW_AUDITED],
+        n[SW_MISSED]
+    );
+}
+
+/// Diagnostics (`VICTORY_WATCH_AUDIT=<n>`, read here; off by default): one
+/// asking in `n` has up to 16 of its pages hashed. A page whose bytes
+/// changed since its last look while neither the kernel (at any of its
+/// views) nor the journal (our own writes, landings) told a write since is
+/// a write the tracking missed: counted, and the first ten logged. Pages not
+/// committed or not readable are passed over. Only ranges the kernel
+/// answers for are looked at: with the guards (`VICTORY_SECTION_WATCH=0`)
+/// that is private memory alone, a control for the audit itself.
+#[cfg(feature = "diagnostics")]
+fn audit(first: usize, last: usize, written: &[(usize, u16)]) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use windows_sys::Win32::System::Memory::{MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_READONLY, PAGE_READWRITE, VirtualQuery};
+    static EVERY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let every = *EVERY.get_or_init(|| {
+        std::env::var("VICTORY_WATCH_AUDIT").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0)
+    });
+    static CALLS: AtomicU64 = AtomicU64::new(0);
+    static SAID: AtomicU64 = AtomicU64::new(0);
+    static SEEN: Mutex<BTreeMap<usize, ([u8; 32], u64)>> = Mutex::new(BTreeMap::new());
+    if every == 0 || !CALLS.fetch_add(1, Ordering::Relaxed).is_multiple_of(every) {
+        return;
+    }
+    let now = ASKED.load(Ordering::Relaxed);
+    let step = (last - first).div_ceil(16).max(1);
+    for page in (first..last).step_by(step) {
+        // SAFETY: plain data filled in by the query.
+        let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: a valid out pointer of the right size.
+        let n = unsafe { VirtualQuery((page * PAGE) as *const _, &mut info, size_of_val(&info)) };
+        let readable = info.Protect & (PAGE_READONLY | PAGE_READWRITE) != 0;
+        let whole = (info.BaseAddress as usize).saturating_add(info.RegionSize) >= (page + 1) * PAGE;
+        if n == 0 || info.State != MEM_COMMIT || !readable || !whole {
+            continue;
+        }
+        // SAFETY: committed and readable over the whole page just now; the
+        // caller holds the range, so the runtime does not unmap it meanwhile.
+        let bytes = unsafe { std::slice::from_raw_parts((page * PAGE) as *const u8, PAGE) };
+        let hash = *blake3::hash(bytes).as_bytes();
+        section_count(SW_AUDITED, 1);
+        let told = written.binary_search_by_key(&page, |w| w.0).is_ok();
+        let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(&(before, at)) = seen.get(&page)
+            && before != hash
+            && !told
+            && journal().notes.parts_since(page, at) == 0
+        {
+            section_count(SW_MISSED, 1);
+            if SAID.fetch_add(1, Ordering::Relaxed) < 10 {
+                tracing::warn!(
+                    page = format_args!("{:#x}", page * PAGE),
+                    "write watch audit: the page changed with no write told (a write the tracking missed)"
+                );
+            }
+        }
+        seen.insert(page, (hash, now));
+    }
+}
+
 /// The pages of `[first, last)` the kernel says were written since it was
 /// last asked, in order, each once, with their written parts; `None` if the range is not write-watched
 /// memory of one reservation. The caller holds the range ([`Asking`]).
-fn kernel_written(first: usize, last: usize) -> Option<Vec<(usize, u16)>> {
+fn kernel_written_one(first: usize, last: usize) -> Option<Vec<(usize, u16)>> {
     use windows_sys::Win32::System::Memory::GetWriteWatch;
     const WRITE_WATCH_FLAG_RESET: u32 = 1;
     FOUND.with(|found| {
