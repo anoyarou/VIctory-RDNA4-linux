@@ -336,9 +336,123 @@ fn in_place_alone() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_PORT_CONSTANTS_ORDER_ALONE").is_none_or(|v| v != "0"))
 }
 
+/// With [`in_place_order`]: such executions clamped in one pass a run
+/// (`VICTORY_PORT_CONSTANTS_ORDER_BATCH=1`, off by default; `=<n>`, 2 or
+/// more: a pass is read by at most n of them). `None`: each alone (or as
+/// `VICTORY_PORT_CONSTANTS_ORDER_ALONE` says).
+///
+/// Alone, each execution's record is clamped by a pass of its own, between
+/// two waits for all earlier work and two moves of the scratch buffer
+/// (`crate::indirect::bound`): the card stops drawing, runs one group of the
+/// clamp, waits again, and draws one record. 2,500-3,000 of them a frame in
+/// the heavy scenes made the card wait 31-35 ms a frame (2-5 ms with fewer
+/// than 1,000).
+///
+/// A run is the executions with arguments in place, one record without a
+/// count each, with nothing recorded between them but state (pipelines,
+/// root arguments, heaps, targets, viewports): the first opens a batch
+/// (`crate::indirect::batch`) right before it, after a wait for every
+/// earlier write, and the others read their records from it. Anything else
+/// ends the run ([`InPlaceRun::end`]): a draw or dispatch that is not one of
+/// it, a copy, a clear, a resolve, a barrier or pipeline sync, a value write
+/// or wait, another host list. So does a member that may write buffers (a
+/// dispatch, shaders that store), after it. Between the pass and each
+/// member, then, the card runs only earlier members, which write no buffer:
+/// it reads the bytes the member's own clamp would have read right before
+/// it. That is the difference from `VICTORY_PORT_CONSTANTS_ORDER_ALONE=0`,
+/// which opened a batch after the last shader that may write buffers and
+/// kept it across direct draws, other executions, barriers and clears
+/// (run pop-15: not enough). What it still assumes: shaders whose code is
+/// seen to store to no buffer store to none (`Translated::stores`, true when
+/// the code is not known), and our own work recorded with a member (its
+/// tables, uploads) writes no title buffer.
+///
+/// A batch's pass costs more than one clamp alone (it is as wide as its
+/// table): `indirect::tests::batch_costs` on the 7900 XTX, 2,355 executions
+/// of an empty dispatch, 6.65 ms each alone, 0.81 ms a batch every 48, 2.86
+/// every 5, 9.95 every one. Runs of one or two are a loss; the frame line
+/// says how many executions a pass had.
+fn in_place_batch() -> Option<u32> {
+    static MOST: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    let asked = *MOST.get_or_init(|| run_most(std::env::var("VICTORY_PORT_CONSTANTS_ORDER_BATCH").ok().as_deref()));
+    // `VICTORY_AB=<s>,VICTORY_PORT_CONSTANTS_ORDER_BATCH`: on and off while
+    // the title runs; on with the variable's n, if it gives one.
+    #[cfg(feature = "diagnostics")]
+    if let Some(on) = crate::ab::pick("VICTORY_PORT_CONSTANTS_ORDER_BATCH") {
+        return on.then(|| asked.unwrap_or(u32::MAX));
+    }
+    asked
+}
+
+/// [`in_place_batch`] from the variable's value.
+fn run_most(value: Option<&str>) -> Option<u32> {
+    match value.map(str::trim) {
+        None | Some("" | "0") => None,
+        Some(v) => Some(v.parse::<u32>().ok().filter(|n| *n >= 2).unwrap_or(u32::MAX)),
+    }
+}
+
+/// Where an execution with arguments in place is clamped ([`in_place_batch`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RunClamp {
+    /// In a pass of its own right before it, as with the switch off.
+    Alone,
+    /// In a batch opened right before it, which the run's next ones read.
+    Open,
+    /// In the batch the run opened (or a new one, if that one has no room).
+    Join,
+}
+
+/// The run of executions with arguments in place under way, if any
+/// ([`in_place_batch`]).
+#[derive(Default)]
+struct InPlaceRun {
+    /// The executions that read the open batch since it was opened, with
+    /// nothing but state recorded between them; 0: no run.
+    members: u32,
+    /// What `members` becomes if the execution [`InPlaceRun::clamp`] was
+    /// asked about last is recorded reading the batch.
+    pending: u32,
+}
+
+impl InPlaceRun {
+    /// Something other than state was recorded: the run ends.
+    fn end(&mut self) {
+        self.members = 0;
+    }
+
+    /// Where the next execution with arguments in place is clamped: `one`,
+    /// it reads one record with no count (what a batch takes); `most`, the
+    /// executions a batch may be read by ([`in_place_batch`], `None`: off).
+    /// The run ends here until [`InPlaceRun::ran`] says it goes on.
+    fn clamp(&mut self, one: bool, most: Option<u32>) -> RunClamp {
+        let members = std::mem::take(&mut self.members);
+        let (at, pending) = match most {
+            Some(most) if one && members > 0 && members < most => (RunClamp::Join, members + 1),
+            Some(_) if one => (RunClamp::Open, 1),
+            _ => (RunClamp::Alone, 0),
+        };
+        self.pending = pending;
+        at
+    }
+
+    /// The execution was recorded reading a batch, which was `opened` for
+    /// it; `writes`: it may write buffers, and the run ends after it.
+    fn ran(&mut self, opened: bool, writes: bool) {
+        let pending = std::mem::take(&mut self.pending);
+        self.members = match (writes, opened) {
+            (true, _) => 0,
+            (false, true) => 1,
+            (false, false) => pending,
+        };
+    }
+}
+
 /// Since the last line: indirect executions with arguments in place, those
-/// clamped alone for it, and the 1 MiB ranges they came from (diagnostics).
-static IN_PLACE_INDIRECT: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+/// clamped after every write before them for it, the passes (each after a
+/// wait) that clamped those, and the 1 MiB ranges they came from
+/// (diagnostics).
+static IN_PLACE_INDIRECT: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 static IN_PLACE_RANGES: std::sync::Mutex<std::collections::BTreeMap<u64, [u64; 3]>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 /// An indirect execution of `kind` with its arguments at `arguments` in place.
@@ -354,10 +468,15 @@ fn in_place_indirect(arguments: u64, kind: u32) {
     ranges.entry(arguments >> 20).or_default()[slot] += 1;
 }
 
+/// A pass (after a wait) clamped records of such executions.
+fn in_place_pass() {
+    IN_PLACE_INDIRECT[2].fetch_add(1, Ordering::Relaxed);
+}
+
 /// With the frame line: indirect executions with arguments in place per
 /// frame over `frames`, and the ranges most of them came from.
 pub(crate) fn in_place_indirect_line(frames: f64) {
-    let [all, alone] = [0, 1].map(|i| IN_PLACE_INDIRECT[i].swap(0, Ordering::Relaxed));
+    let [all, alone, passes] = [0, 1, 2].map(|i| IN_PLACE_INDIRECT[i].swap(0, Ordering::Relaxed));
     if all == 0 {
         return;
     }
@@ -370,9 +489,12 @@ pub(crate) fn in_place_indirect_line(frames: f64) {
         .map(|(mb, n)| format!("{:#x}+1MiB: {:.0} draws {:.0} dispatches {:.0} mesh", mb << 20, n[0] as f64 / frames, n[1] as f64 / frames, n[2] as f64 / frames))
         .collect();
     tracing::info!(
-        "renderer port 1: indirect executions with arguments or count in place per frame: {:.0}, of them {:.0} clamped after every shader write before them (VICTORY_PORT_CONSTANTS_ORDER); from {} ranges of 1 MiB, the busiest: {}",
+        "renderer port 1: indirect executions with arguments or count in place per frame: {:.0}, of them {:.0} clamped after every shader write before them (VICTORY_PORT_CONSTANTS_ORDER), in {:.0} passes with a wait before each ({:.1} executions a pass; VICTORY_PORT_CONSTANTS_ORDER_BATCH {}: one pass a run of them with nothing but state between); from {} ranges of 1 MiB, the busiest: {}",
         all as f64 / frames,
         alone as f64 / frames,
+        passes as f64 / frames,
+        alone as f64 / passes.max(1) as f64,
+        if in_place_batch().is_some() { "on" } else { "off" },
         by.len(),
         top.join("; ")
     );
@@ -479,6 +601,9 @@ pub(crate) struct State {
     /// The records clamped in a batch, if later executions may still read
     /// them ([`batches`]).
     batch: Option<Batch>,
+    /// The run of executions with arguments in place that may read the
+    /// open batch ([`in_place_batch`]).
+    run: InPlaceRun,
     /// The user data bound last, of the last stage that has some (for the
     /// report of a removed device, `crate::host::indirects`).
     #[cfg(feature = "diagnostics")]
@@ -2941,6 +3066,7 @@ impl State {
     pub(crate) fn dispatch(&mut self, list: &HostList, x: u32, y: u32, z: u32, flags: u32) {
         // It may write the arguments a window holds clamped.
         self.window = None;
+        self.run.end();
         #[cfg(feature = "diagnostics")]
         if crate::pipeline::is_skipped(self.pipeline as This) {
             DROPPED.fetch_add(1, Ordering::Relaxed);
@@ -3424,6 +3550,7 @@ impl State {
     /// programs are one-dimensional).
     pub(crate) fn dispatch_mesh(&mut self, list: &HostList, x: u32) {
         self.window = None;
+        self.run.end();
         #[cfg(feature = "diagnostics")]
         self.trace("mesh", x, 0);
         let ran = mesh_test() != 1
@@ -3968,6 +4095,7 @@ impl State {
         first_instance: u32,
     ) {
         self.window = None;
+        self.run.end();
         #[cfg(feature = "diagnostics")]
         self.trace("draw", vertices, first);
         let ready = self.prepare(list, false);
@@ -4077,6 +4205,7 @@ impl State {
         first_instance: u32,
     ) {
         self.window = None;
+        self.run.end();
         #[cfg(feature = "diagnostics")]
         self.trace("indexed", indices, first);
         // Indexed rectangles are drawn by the rectangle geometry stage
@@ -4109,6 +4238,7 @@ impl State {
     /// Shaders that can write buffers were recorded: arguments may be others
     /// from here on.
     fn buffers_written(&mut self) {
+        self.run.end();
         match &mut self.batch {
             Some(batch) if batches() == 2 => batch.wrote = true,
             batch => *batch = None,
@@ -4118,6 +4248,7 @@ impl State {
     /// A draw with the pipeline `p` was recorded (as [`State::buffers_written`]
     /// if its shaders can store to buffers).
     fn drew(&mut self, list: &HostList, p: Option<&HostPipeline>) {
+        self.run.end();
         if p.is_none_or(|p| p.stages.iter().any(|stage| stage.translated().stores)) {
             self.batch = None;
         }
@@ -4130,12 +4261,21 @@ impl State {
 
     /// A buffer was copied to: what was clamped of it ahead is clamped anew.
     pub(crate) fn copied(&mut self) {
+        self.run.end();
         self.window = None;
         self.batch = None;
     }
 
+    /// The title recorded work other than draws, dispatches and state (a
+    /// copy, a clear, a resolve, a value write or wait): it ends a run of
+    /// executions with arguments in place ([`in_place_batch`]).
+    pub(crate) fn other_work(&mut self) {
+        self.run.end();
+    }
+
     /// The title waits for earlier work (a barrier or a pipeline sync).
     pub(crate) fn synced(&mut self) {
+        self.run.end();
         if self.batch.as_ref().is_some_and(|b| b.wrote) {
             self.batch = None;
         }
@@ -4143,29 +4283,31 @@ impl State {
 
     /// Where the clamped record of `kind` at `arguments` of the copy `args`
     /// is, from the open batch or a new one ([`batches`]). `None` if it
-    /// cannot be clamped in one.
+    /// cannot be clamped in one. With it, whether the batch was opened for
+    /// it: a pass, after a wait, recorded right here.
     fn batched(
         &mut self,
         list: &HostList,
         args: &std::sync::Arc<crate::shadow::Shadow>,
         arguments: u64,
         kind: u32,
-    ) -> Option<(ID3D12Resource, u64)> {
+    ) -> Option<(ID3D12Resource, u64, bool)> {
         const BATCH_USE: usize = usize::MAX - 0x78;
         const DISPATCH: u32 = 2;
         // Another host list, or this one after its reset ([`windows`]).
         if list.first_use(BATCH_USE) {
             self.batch = None;
         }
-        // A draw after dispatches waits for them.
-        if kind != DISPATCH {
-            self.synced();
+        // A draw after dispatches waits for them (as `synced`, the run of
+        // the execution asking left as it is).
+        if kind != DISPATCH && self.batch.as_ref().is_some_and(|b| b.wrote) {
+            self.batch = None;
         }
         let (id, offset) = (args.id(), args.offset(arguments));
         if let Some(b) = &mut self.batch
             && let Some(at) = b.table.place(id, offset, kind)
         {
-            return Some((b.scratch.clone(), at));
+            return Some((b.scratch.clone(), at, false));
         }
         self.batch = None;
         let (mut table, scratch) = crate::indirect::open_batch(list, (id, &args.buffer), &argument_copies(args))?;
@@ -4173,7 +4315,7 @@ impl State {
         self.host_roots[1] = 0;
         let at = table.place(id, offset, kind)?;
         self.batch = Some(Batch { table, scratch: scratch.clone(), wrote: false });
-        Some((scratch, at))
+        Some((scratch, at, true))
     }
 
     /// Indirect execution of a one-argument signature of `kind` (PC
@@ -4268,31 +4410,46 @@ impl State {
             return false;
         }
         // Renderer port 1: arguments (or their count) in the title's memory
-        // read in place ([`in_place_order`]): clamped alone, right before
-        // their execution, after a wait for every earlier shader write.
+        // read in place ([`in_place_order`]): clamped right before their
+        // execution, after a wait for every earlier shader write, alone or
+        // in one pass for a run of them ([`in_place_batch`]).
         let in_place = args.in_place() || counter.as_ref().is_some_and(|(s, _)| s.in_place());
         if in_place {
             in_place_indirect(arguments, kind);
         }
         let ordered = in_place && in_place_order();
+        let one = batches() > 0 && max == 1 && count.is_none();
+        // In one pass a run of them (`VICTORY_PORT_CONSTANTS_ORDER_BATCH`,
+        // [`in_place_batch`]): the first opens a batch right here, the others
+        // with nothing but state between them read it. Every execution with
+        // arguments in place asks, so that the run ends at one that is not
+        // of it.
+        let most = if ordered { in_place_batch() } else { None };
+        let run = ordered.then(|| self.run.clamp(one, most));
         // Alone (`VICTORY_PORT_CONSTANTS_ORDER_ALONE=1`): no batch at all.
         // Else a batch that a shader writing buffers was recorded after is
         // not used: a new one is opened here, after it (what
         // `VICTORY_INDIRECT_BATCH=1` does for every batch).
-        let alone = ordered && in_place_alone();
+        let alone = ordered && most.is_none() && in_place_alone();
         if ordered {
-            if alone || self.batch.as_ref().is_some_and(|b| b.wrote) {
+            let wrote = most.is_none() && self.batch.as_ref().is_some_and(|b| b.wrote);
+            if alone || wrote || run == Some(RunClamp::Open) {
                 self.batch = None;
             }
             self.window = None;
         }
         // One record without a count: clamped in a batch (`batches`).
-        let batch = if !alone && batches() > 0 && max == 1 && count.is_none() {
+        let batch = if !alone && one {
             args.refresh(list, arguments, len);
             self.batched(list, &args, arguments, kind)
         } else {
             None
         };
+        let opened = batch.as_ref().map(|b| b.2);
+        if ordered && opened == Some(true) {
+            in_place_pass();
+        }
+        let batch = batch.map(|(scratch, at, _)| (scratch, at));
         if batch.is_some() {
             self.window = None;
         }
@@ -4364,6 +4521,9 @@ impl State {
                     why("not bounded (no clamp, or arguments not 4-byte aligned)");
                     return false;
                 };
+                if ordered {
+                    in_place_pass();
+                }
                 self.host_pipeline = 0;
                 self.host_roots[1] = 0;
                 self.window = windowed.then(|| Window {
@@ -4422,6 +4582,15 @@ impl State {
             self.buffers_written();
         } else {
             self.drew(list, Some(p));
+        }
+        // Of a run that read a batch ([`in_place_batch`]): the next execution
+        // with arguments in place may read it too, unless this one may have
+        // written buffers (a dispatch, shaders that store, or a light probe
+        // pass recorded after it).
+        if let (Some(RunClamp::Open | RunClamp::Join), Some(opened)) = (run, opened) {
+            let writes = kind == DISPATCH
+                || p.stages.iter().any(|stage| stage.translated().stores || stage.shader.probe.is_some());
+            self.run.ran(opened, writes);
         }
         // The scratch buffer stays readable as arguments: the next draw of
         // the window reads it with no barrier, and the next clamp moves it
@@ -5010,5 +5179,173 @@ mod record_hash_tests {
         // (One record of zeros is among the above.)
         let zeros: Vec<u64> = (2..100).map(|n| of(&vec![[0; 3]; n])).collect();
         assert!(zeros.iter().all(|h| seen.insert(*h)));
+    }
+}
+
+#[cfg(test)]
+mod in_place_run_tests {
+    use super::{InPlaceRun, RunClamp, run_most};
+
+    /// What a title list records, as the run sees it.
+    #[derive(Clone, Copy)]
+    enum Op {
+        /// A pipeline, root arguments, heaps, targets: nothing on the card.
+        State,
+        /// Anything else that is not an execution with arguments in place:
+        /// a draw or dispatch, a copy, a clear, a barrier, a value write or
+        /// wait. Taken as writing title memory, whether it does or not.
+        Work,
+        /// An execution with arguments in place: one record without a count
+        /// (`one`), and whether it may write buffers (a dispatch, shaders
+        /// that store).
+        Exec { one: bool, writes: bool },
+    }
+    use Op::*;
+
+    const READ: Op = Exec { one: true, writes: false };
+
+    /// Records `ops` as `State::execute_indirect` and the methods around it
+    /// drive the run, with batches of `room` records (the table's jobs), and
+    /// a count of the writes that stands for what title memory holds. The
+    /// open batch is left open across `Work` on purpose (a draw that stores
+    /// nothing leaves it open in the layer): only the run keeps it from
+    /// being read across one. The passes recorded, and per execution the
+    /// writes its record was clamped after and the writes before it.
+    fn record(ops: &[Op], most: Option<u32>, room: u32) -> (u32, Vec<(u32, u32)>) {
+        let mut run = InPlaceRun::default();
+        let (mut written, mut passes) = (0u32, 0u32);
+        // The open batch: the writes before its pass, the records in it.
+        let mut batch: Option<(u32, u32)> = None;
+        let mut seen = Vec::new();
+        for &op in ops {
+            match op {
+                State => {}
+                Work => {
+                    run.end();
+                    written += 1;
+                }
+                Exec { one, writes } => {
+                    let at = run.clamp(one, most);
+                    if at == RunClamp::Open {
+                        batch = None;
+                    }
+                    let opened = match (at, &mut batch) {
+                        (RunClamp::Alone, _) => None,
+                        (_, Some((_, records))) if *records < room => {
+                            *records += 1;
+                            Some(false)
+                        }
+                        _ => {
+                            batch = Some((written, 1));
+                            Some(true)
+                        }
+                    };
+                    let clamped_after = match opened {
+                        None => written,
+                        Some(_) => batch.unwrap().0,
+                    };
+                    if at == RunClamp::Alone || opened == Some(true) {
+                        passes += 1;
+                    }
+                    seen.push((clamped_after, written));
+                    // The execution, and what it may write (`drew`,
+                    // `buffers_written`).
+                    run.end();
+                    if writes {
+                        written += 1;
+                        batch = None;
+                    }
+                    if let Some(opened) = opened {
+                        run.ran(opened, writes);
+                    }
+                }
+            }
+        }
+        (passes, seen)
+    }
+
+    /// No execution reads a record clamped before a write recorded ahead
+    /// of it.
+    fn in_order(seen: &[(u32, u32)]) -> bool {
+        seen.iter().all(|(clamped, before)| clamped == before)
+    }
+
+    #[test]
+    fn a_run_with_only_state_between_is_one_pass() {
+        let ops = [Work, READ, State, READ, State, State, READ, READ];
+        let (passes, seen) = record(&ops, Some(u32::MAX), 256);
+        assert_eq!(passes, 1);
+        assert_eq!(seen.len(), 4);
+        assert!(in_order(&seen));
+        // Off: a pass each, as before.
+        let (passes, seen) = record(&ops, None, 256);
+        assert_eq!(passes, 4);
+        assert!(in_order(&seen));
+    }
+
+    #[test]
+    fn anything_but_state_ends_the_run() {
+        let ops = [READ, READ, Work, READ, READ, READ, Work, Work, READ, State, READ];
+        let (passes, seen) = record(&ops, Some(u32::MAX), 256);
+        assert_eq!(passes, 3);
+        assert!(in_order(&seen));
+    }
+
+    #[test]
+    fn an_execution_that_may_write_ends_the_run_after_it() {
+        let w = Exec { one: true, writes: true };
+        // The writer reads the run's pass (its own record comes before it),
+        // the next one opens another.
+        let ops = [READ, w, READ, READ, w, w, READ];
+        let (passes, seen) = record(&ops, Some(u32::MAX), 256);
+        assert_eq!(passes, 4);
+        assert!(in_order(&seen));
+    }
+
+    #[test]
+    fn executions_a_batch_cannot_hold_are_alone_and_end_the_run() {
+        let counted = Exec { one: false, writes: false };
+        let ops = [READ, READ, counted, READ, counted, counted, READ];
+        let (passes, seen) = record(&ops, Some(u32::MAX), 256);
+        // Runs [0, 1], [3], [6]; three alone.
+        assert_eq!(passes, 6);
+        assert!(in_order(&seen));
+    }
+
+    #[test]
+    fn a_full_batch_or_the_most_asked_opens_another() {
+        let ops = vec![READ; 10];
+        assert_eq!(record(&ops, Some(u32::MAX), 4).0, 3);
+        assert_eq!(record(&ops, Some(3), 256).0, 4);
+        assert_eq!(record(&ops, Some(u32::MAX), 256).0, 1);
+        assert!(in_order(&record(&ops, Some(3), 4).1));
+    }
+
+    #[test]
+    fn order_holds_whatever_comes_between() {
+        // Every sequence of six of the five kinds: each execution's record
+        // is clamped after every write before it, and no more passes than
+        // with each alone.
+        let kinds = [State, Work, READ, Exec { one: true, writes: true }, Exec { one: false, writes: false }];
+        let n = kinds.len();
+        for code in 0..n.pow(6) {
+            let ops: Vec<Op> = (0..6).map(|i| kinds[code / n.pow(i) % n]).collect();
+            for (most, room) in [(Some(u32::MAX), 256), (Some(2), 256), (Some(u32::MAX), 2), (None, 256)] {
+                let (passes, seen) = record(&ops, most, room);
+                assert!(in_order(&seen), "out of order: code {code}, most {most:?}, room {room}");
+                assert!(passes as usize <= seen.len());
+            }
+        }
+    }
+
+    #[test]
+    fn the_variable_reads_as_off_on_or_most() {
+        assert_eq!(run_most(None), None);
+        assert_eq!(run_most(Some("0")), None);
+        assert_eq!(run_most(Some("")), None);
+        assert_eq!(run_most(Some("1")), Some(u32::MAX));
+        assert_eq!(run_most(Some("on")), Some(u32::MAX));
+        assert_eq!(run_most(Some("32")), Some(32));
+        assert_eq!(run_most(Some(" 2 ")), Some(2));
     }
 }
