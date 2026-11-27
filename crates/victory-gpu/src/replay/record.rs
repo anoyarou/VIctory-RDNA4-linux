@@ -41,6 +41,10 @@ pub struct Settings {
     /// Record lists from the start on, not only once a capture is near: for
     /// a title that submits lists it recorded long before.
     pub always: bool,
+    /// Lists sent to other queues (compute, copy) go into the capture too,
+    /// in the order they were sent, among the drawing queue's
+    /// (`VICTORY_RECORD_QUEUES=0`: the drawing queue's only).
+    pub queues: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -65,11 +69,13 @@ impl Settings {
             .and_then(|v| v.trim().parse().ok())
             .unwrap_or(1);
         let always = std::env::var_os("VICTORY_RECORD_ALWAYS").is_some_and(|v| v == "1");
+        let queues = std::env::var_os("VICTORY_RECORD_QUEUES").is_none_or(|v| v != "0");
         Some(Settings {
             folder,
             at,
             frames: std::cmp::max(frames, 1),
             always,
+            queues,
         })
     }
 }
@@ -1941,8 +1947,11 @@ unsafe extern "system" fn execute(this: Ptr, n: u32, lists: *const Ptr) {
         };
         let kind = hook::state::<QueueState>(this).kind;
         if kind != D3D12_COMMAND_LIST_TYPE_DIRECT.0 {
-            snap::other_queue(r, n);
-            return go();
+            if !r.settings.queues {
+                snap::other_queue(r, n);
+                return go();
+            }
+            snap::joined_queue(r, n);
         }
         let all = std::slice::from_raw_parts(lists, n as usize);
         snap::submit(r, &borrow::<ID3D12CommandQueue>(this), all, go);

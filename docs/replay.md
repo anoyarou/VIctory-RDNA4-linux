@@ -147,8 +147,12 @@ The `--diverge` family runs the recorded copies without the merge.
   `VICTORY_CLAMP_SYNC` and of the placed-texture copies) are played as one
   global unordered-access barrier each: a wait at least as strong. Captures
   made before this was recorded leave them out, and their replays can race.
+- Lists sent to other queues (compute, copy) are recorded in the order the
+  CPU sent them and played on the drawing queue among its lists
+  (`VICTORY_RECORD_QUEUES=0`: left out, as before). What the queues waited
+  for of each other is not kept; the order they were sent in stands for it.
 - Not kept: contents of multisampled textures, of textures in memory the CPU
-  sees, and of texture levels over 256 MB; resources of other queues' work.
+  sees, and of texture levels over 256 MB; resources of other queues' work with `VICTORY_RECORD_QUEUES=0`.
 - Texture states come from the barriers seen. A resource that overlaps the
   one last used (aliasing) is taken as without contents.
 - Addresses in memory are not rewritten: indirect arguments with addresses

@@ -1664,6 +1664,7 @@ fn a_frame_is_recorded_and_replayed() {
         at: At::Frame(1),
         frames: 1,
         always: false,
+        queues: false,
     };
     let folder = record::start(settings, &device).unwrap();
     assert!(record::on());
@@ -1674,7 +1675,8 @@ fn a_frame_is_recorded_and_replayed() {
                 folder: dir.path().to_owned(),
                 at: At::Trigger,
                 frames: 1,
-                always: false
+                always: false,
+                queues: false,
             },
             &device
         )

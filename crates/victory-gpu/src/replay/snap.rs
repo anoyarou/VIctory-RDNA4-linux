@@ -70,7 +70,22 @@ pub(super) fn other_queue(r: &Recorder, lists: u32) {
     }
 }
 
-/// A submission to the drawing queue, made by `go`.
+/// A submission to another queue that goes into the capture as if it were
+/// the drawing queue's (`Settings::queues`): the replay runs it in the
+/// order it was sent, with the drawing queue's lists before and after it
+/// done. What the queues waited for of each other is not kept: the order
+/// the CPU sent them in stands for it.
+pub(super) fn joined_queue(r: &Recorder, lists: u32) {
+    if r.watching.load(Ordering::SeqCst) {
+        r.problem_times(
+            "lists sent to other queues (compute, copy) are in the capture, in the order they were sent",
+            u64::from(lists),
+        );
+    }
+}
+
+/// A submission to the drawing queue (or, `Settings::queues`, another),
+/// made by `go`.
 pub(super) fn submit(
     r: &Recorder,
     queue: &ID3D12CommandQueue,

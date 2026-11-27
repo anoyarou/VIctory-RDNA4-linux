@@ -355,6 +355,7 @@ fn a_frame_of_a_titles_size() {
         at: At::Frame(4),
         frames: 1,
         always: false,
+        queues: false,
     };
     let folder = record::start(settings, &device).unwrap();
     let began = Instant::now();
