@@ -78,11 +78,31 @@ pub(crate) fn on() -> bool {
     *ON.get_or_init(|| std::env::var("VICTORY_PORT_CONSTANTS").is_ok_and(|v| v.trim() == "1"))
 }
 
-/// A stretch of title memory opened as a heap through a view of ours.
+/// `VICTORY_PORT_SECTION`: `1` (with [`on`], under Wine) opens a stretch as
+/// a heap on its section itself (`OpenExistingHeapFromFileMapping`), which
+/// our Wine imports into Vulkan as a dma-buf of the section's memfd and our
+/// vkd3d-proton takes as the heap's memory (LeanWasTaken/VIctory-bc250
+/// `e691b2d`, and Wine `a25f6ad`, `9b6b938`). The home path is off then
+/// (`xmem`): the title's pages stay the section's. Why: a heap opened on an
+/// address is a userptr buffer, whose pages amdgpu walks at every command
+/// submission while holding the process's `mmap_lock` (1.6 ms each, ~700 a
+/// second: run 108, RetailTitleCompat `CPU-BOTTLENECK-ANALYSIS.md` sections
+/// 12-13); a dma-buf is mapped for the card once. Unset or anything else:
+/// as before.
+pub(crate) fn section_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    // Read once, here.
+    *ON.get_or_init(|| on() && crate::pipeline::on_wine() && std::env::var("VICTORY_PORT_SECTION").is_ok_and(|v| v.trim() == "1"))
+}
+
+/// A stretch of title memory opened as a heap through a view of ours (or,
+/// [`section_on`], on its whole section: the stretch begins `skip` bytes
+/// into the heap).
 struct Region {
     start: u64,
     end: u64,
     heap: ID3D12Heap,
+    skip: u64,
 }
 
 // SAFETY: D3D12 heaps are free-threaded.
@@ -127,7 +147,9 @@ pub(crate) fn place_for(start: u64, len: u64, window: bool) -> Option<Placed> {
     // itself (`open_at_home`, `crate::inplace::heap_shows`) and gives a
     // stretch up when the card reads zeros.
     let home = crate::pipeline::on_wine() && crate::inplace::at_home(start as usize, len as usize);
-    if let Err(why) = if home { &Ok(()) } else { section_view_coherent(&host.device) } {
+    // With `VICTORY_PORT_SECTION` the section itself is opened: its own probe
+    // ([`crate::inplace::section_import_shared`]) in [`open_from_section`].
+    if let Err(why) = if home || section_on() { &Ok(()) } else { section_view_coherent(&host.device) } {
         let n = STATS[5].fetch_add(1, Ordering::Relaxed) + 1;
         if n == 1 {
             tracing::warn!(
@@ -182,7 +204,7 @@ pub(crate) fn place_in(device: &ID3D12Device, start: u64, len: u64) -> Result<Pl
         }
     };
     let region = &regions[i];
-    let buffer = crate::inplace::place(device, &region.heap, at - region.start, end - at).map_err(|e| (6, format!("no buffer placed in the region: {e}")))?;
+    let buffer = crate::inplace::place(device, &region.heap, region.skip + at - region.start, end - at).map_err(|e| (6, format!("no buffer placed in the region: {e}")))?;
     // SAFETY: a live buffer.
     let gpu = unsafe { buffer.GetGPUVirtualAddress() } + (start - at);
     Ok(Placed { buffer, heap: region.heap.clone(), gpu, bias: start - at })
@@ -210,6 +232,9 @@ fn open_region(device: &ID3D12Device, at: u64, end: u64) -> Result<Region, (usiz
     }
     if first > at || first + bytes < end || offset % K64 != 0 {
         return Err((3, format!("the stretch {first:#x}+{bytes:#x} does not hold it")));
+    }
+    if section_on() {
+        return open_from_section(device, first, bytes, section as usize, offset);
     }
     if crate::pipeline::on_wine() {
         // Under Wine the host opens a heap on a view with memory of its own
@@ -250,7 +275,7 @@ fn open_region(device: &ID3D12Device, at: u64, end: u64) -> Result<Region, (usiz
             );
             // shortcut: the view stays mapped for good (the heap holds its
             // pages while anything names it).
-            Ok(Region { start: first, end: first + bytes, heap })
+            Ok(Region { start: first, end: first + bytes, heap, skip: 0 })
         }
         Err(e) => {
             unmap();
@@ -296,7 +321,7 @@ fn open_at_home(device: &ID3D12Device, first: u64, bytes: u64) -> Result<Region,
                 attempt,
                 "renderer port 1: a stretch of the title's graphics memory opened as a host heap where the title has it (pages shown as memory of their own, under Wine)"
             );
-            return Ok(Region { start: first, end: first + bytes, heap });
+            return Ok(Region { start: first, end: first + bytes, heap, skip: 0 });
         }
         tracing::warn!(
             start = format_args!("{first:#x}"),
@@ -309,6 +334,39 @@ fn open_at_home(device: &ID3D12Device, first: u64, bytes: u64) -> Result<Region,
     }
     crate::inplace::home_given_up(first as usize, bytes as usize);
     Err((5, "the card reads zeros in the heap the host opened on the title's pages".to_owned()))
+}
+
+/// [`section_on`]: opens the whole of `section`, where `[first, first +
+/// bytes)` lies at `offset`, as a heap. The card is asked once, on a section
+/// of our own, whether such a heap is the section's memory (vkd3d-proton
+/// falls back to a view of Wine's when the import fails, which the card reads
+/// as zeros), and then whether it reads the title's bytes here.
+fn open_from_section(device: &ID3D12Device, first: u64, bytes: u64, section: usize, offset: u64) -> Result<Region, (usize, String)> {
+    if !crate::inplace::section_import_shared(device) {
+        return Err((5, "a heap opened on a section is not the section's memory to the card (VICTORY_PORT_SECTION needs our Wine and d3d12core.dll)".to_owned()));
+    }
+    let heap = crate::inplace::open(device, crate::inplace::From::Section(section)).map_err(|e| (5, format!("the section refused by the host: {e}")))?;
+    // SAFETY: a plain query.
+    let size = unsafe { heap.GetDesc() }.SizeInBytes;
+    if size > MOST || offset + bytes > size {
+        return Err((3, format!("a section of {size:#x} bytes, the stretch at {offset:#x}+{bytes:#x}: over the most of a region or outside it")));
+    }
+    if !committed(first as usize, bytes as usize) {
+        return Err((4, "pages of the stretch are not committed".to_owned()));
+    }
+    let shows = crate::inplace::heap_shows_at(device, &heap, offset as usize, first as usize, bytes as usize);
+    if shows == Some(false) {
+        return Err((5, "the card reads zeros in the heap opened on the section".to_owned()));
+    }
+    tracing::info!(
+        start = format_args!("{first:#x}"),
+        bytes,
+        section_bytes = size,
+        offset = format_args!("{offset:#x}"),
+        card_reads_it = ?shows,
+        "renderer port 1: a stretch of the title's graphics memory opened as a host heap on its section (a dma-buf under our Wine, VICTORY_PORT_SECTION)"
+    );
+    Ok(Region { start: first, end: first + bytes, heap, skip: offset })
 }
 
 /// Whether every page of `[at, at + len)` is committed.

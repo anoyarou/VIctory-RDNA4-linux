@@ -825,6 +825,57 @@ pub(crate) fn view_is_shared(device: &ID3D12Device) -> bool {
     })
 }
 
+/// Whether a heap opened on a section (`OpenExistingHeapFromFileMapping`)
+/// is that section's memory to the card: a committed section of our own is
+/// written through a view and opened, and the card asked what it reads. Once.
+/// Under our Wine and d3d12core.dll the heap is a dma-buf of the section
+/// (`crate::port::section_on`); elsewhere under Wine it is a view's userptr,
+/// which the card reads as zeros.
+pub(crate) fn section_import_shared(device: &ID3D12Device) -> bool {
+    static SHARED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SHARED.get_or_init(|| {
+        let asked = (|| -> windows::core::Result<bool> {
+            let mut rig = Rig::new(device)?;
+            // SAFETY: a section and a view of our own, let go below; every
+            // address used lies in the view.
+            unsafe {
+                let invalid = windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+                let section = mem::CreateFileMappingW(invalid, std::ptr::null(), mem::PAGE_READWRITE | mem::SEC_COMMIT, 0, K64 as u32, std::ptr::null());
+                let view = if section.is_null() { std::ptr::null_mut() } else { mem::MapViewOfFile(section, mem::FILE_MAP_WRITE, 0, 0, K64).Value.cast::<u8>() };
+                let seen = if view.is_null() {
+                    Err(windows::core::Error::from_thread())
+                } else {
+                    fill(view, K64, 9);
+                    open(device, From::Section(section as usize)).and_then(|heap| {
+                        let buffer = place(device, &heap, 0, K64 as u64)?;
+                        let first = same(view, &rig.fetch(&buffer, 0, K64)?);
+                        // Written again after the heap was opened: the same pages, not a copy.
+                        fill(view, K64, 23);
+                        Ok(first && same(view, &rig.fetch(&buffer, 0, K64)?))
+                    })
+                };
+                if !view.is_null() {
+                    mem::UnmapViewOfFile(mem::MEMORY_MAPPED_VIEW_ADDRESS { Value: view.cast() });
+                }
+                if !section.is_null() {
+                    windows_sys::Win32::Foundation::CloseHandle(section);
+                }
+                seen
+            }
+        })();
+        match asked {
+            Ok(shared) => {
+                tracing::info!(shared, "a host heap opened on a section: whether the card reads the section's bytes there (VICTORY_PORT_SECTION)");
+                shared
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "a host heap on a section could not be tried: taken as not the section's memory");
+                false
+            }
+        }
+    })
+}
+
 /// Whether the card reads the memory's bytes through `heap`, opened on
 /// `[memory, memory + bytes)`: the first 4 KiB of its first 32 MiB that are
 /// not all zeros are fetched through a buffer placed there and compared with
@@ -832,6 +883,11 @@ pub(crate) fn view_is_shared(device: &ID3D12Device) -> bool {
 /// there (the host gave the heap memory of its own, [`HOMES`]). `None`:
 /// nothing to tell by (all zeros so far, or changing under the look).
 pub(crate) fn heap_shows(device: &ID3D12Device, heap: &ID3D12Heap, memory: usize, bytes: usize) -> Option<bool> {
+    heap_shows_at(device, heap, 0, memory, bytes)
+}
+
+/// [`heap_shows`] for memory that begins `skip` bytes into `heap`.
+pub(crate) fn heap_shows_at(device: &ID3D12Device, heap: &ID3D12Heap, skip: usize, memory: usize, bytes: usize) -> Option<bool> {
     const PAGE: usize = 4096;
     // No mapping change while the memory is read; not waited for (the caller
     // may hold what such a change waits for).
@@ -843,8 +899,9 @@ pub(crate) fn heap_shows(device: &ID3D12Device, heap: &ID3D12Heap, memory: usize
     let at = all.chunks_exact(PAGE).position(|page| page.iter().any(|b| *b != 0))? * PAGE;
     let before = all[at..at + PAGE].to_vec();
     let from = at / K64 * K64;
-    let buffer = place(device, heap, from as u64, K64.min(bytes - from) as u64).ok()?;
-    let got = Rig::new(device).and_then(|mut rig| rig.fetch(&buffer, (at - from) as u64, PAGE)).ok()?;
+    let base = (skip + from) / K64 * K64;
+    let buffer = place(device, heap, base as u64, K64.min(bytes - from) as u64).ok()?;
+    let got = Rig::new(device).and_then(|mut rig| rig.fetch(&buffer, (skip + at - base) as u64, PAGE)).ok()?;
     if got == before || got == all[at..at + PAGE] {
         Some(true)
     } else if got.iter().all(|b| *b == 0) {

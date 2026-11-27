@@ -709,7 +709,12 @@ impl Section {
 /// maps the heap's five pieces once). Shown at a second one, the section's
 /// pages all go back to being its file ([`homeless`]), with a warning.
 fn home_on() -> bool {
-    static ON: LazyLock<bool> = LazyLock::new(|| port_on() && wine_map::on() && std::env::var_os("VICTORY_PORT_HOME").is_none_or(|v| v != "0"));
+    static ON: LazyLock<bool> = LazyLock::new(|| port_on()
+            && wine_map::on()
+            && std::env::var_os("VICTORY_PORT_HOME").is_none_or(|v| v != "0")
+            // `VICTORY_PORT_SECTION=1` (victory-gpu `port::section_on`): the
+            // heap is opened on the section itself, so the pages stay its.
+            && std::env::var("VICTORY_PORT_SECTION").ok().is_none_or(|v| v.trim() != "1"));
     *ON
 }
 
