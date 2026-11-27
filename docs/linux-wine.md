@@ -215,8 +215,8 @@ here; built only.
 
 - **Belobug/VIctory-Belobug-AMD#636** (MamaLeVrai): a slot flipped ahead under relay 2 waits for the submissions begun
   when it was queued (part of Belobug/VIctory-Belobug-AMD#545). Candidate for the waxy faces with `VICTORY_SUBMIT_FRAMES=2`.
-  **Reverted (`2686164`) after run 67:** 1.4-1.6 s a frame (run 65: ~60 ms), the submitting thread's texture refresh
-  updates 1,066 ms a frame (27). Suspected, to be confirmed by run 68 without it.
+  Run 67 (1.4-1.6 s a frame) was first blamed on it and the merge reverted; run 68 without it was as slow, so it was
+  restored (`7d7800a`). Its own effect is untested here.
 - **avatarmanz/VIctory-7900XTX#438** (HAL9000RELOADED): `VICTORY_PORT_CONSTANTS_ORDER_BATCH=1` (off) clamps a run of
   port 1's in-place indirect executions in one pass. Reported 68 -> 40 ms on an RX 7900 XTX (Windows); slower on an RTX 5090
   under Proton. For run 64's slow renderer patches.
@@ -226,6 +226,11 @@ here; built only.
 - **avatarmanz/VIctory-7900XTX#457** (delacor): thin replays reuse finished host lists (`VICTORY_LIST_CREATE_POOL=0`: old path).
 - **Belobug/VIctory-Belobug-AMD#478** (cmt8): the write guard makes only view memory read-only (under Wine a thread's
   stack in a guarded range was made read-only and the kernel ended the process); one `VirtualQuery` a region.
+  **Reverted (`f9eae87`): it does not fit `VICTORY_WINE_MAP`.** It guards a block only if `VirtualQuery` reports a mapped
+  view; with avatarmanz/VIctory-7900XTX#440's `VICTORY_WINE_MAP` (on under Wine) the title's pages are host `mmap`s that Wine
+  reports as private memory, so they were never guarded and were copied every frame: runs 67-68, copies up 8-10 GB a frame
+  (run 65: 58 MB), 1.2-1.6 s a frame [measured]. The crash it fixes (a stack between section views) needs the view
+  layout that `WINE_MAP` replaces.
 - **avatarmanz/VIctory-7900XTX#450** (UwUCammie): `VICTORY_EARLY_SCREEN_MAX_BYTES` (off unless set) compiles small screen
   pipelines at creation.
 - **Belobug/VIctory-Belobug-AMD#625** (11run11): texture store kept levels bounded by host memory; only with
