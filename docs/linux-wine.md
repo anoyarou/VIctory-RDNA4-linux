@@ -137,6 +137,20 @@ same spot (a snake terrarium) on the view-tree wineserver, **run 58: 81 ms a fra
 ~7,800 draws, preparing 66, copy-back 28, texture refreshes 24 ms a frame: in line with run 45's
 72-75 ms at ~7,000 draws. The new commits, #390 included, cost nothing visible here. Untested: TV/phone video.
 
+## Picked up 2026-11-27, second round (`e5efd8c`; runs 59-61)
+
+Cherry-picked on `725c580` (each commit names its PR):
+- avatarmanz/VIctory-7900XTX#437 (`VICTORY_TWIN_EXACT`, on): raw twins of buffer views not on 16 bytes begin at the view's
+  own dword instead of being null views. Conflict in `descriptor.rs` `sync_line`: the port-1 in-place indirect line was left
+  out (port 1 is not on this branch). **Fixes the plants popping near the player under Wine** (run 59, verified in game).
+- avatarmanz/VIctory-7900XTX#423 (`VICTORY_FILE_CACHE`, on), #447 (`VICTORY_KEEP_PAGES`, off), #448, #443
+  (`VICTORY_LIBRARY_PREFETCH`, off), #446; Belobug/VIctory-Belobug-AMD#512, #518. Carried over, not measured one by one.
+
+Measured: ~71-72 ms a frame standing at ~4,600 draws (run 59); the card is idle, preparing (~61 ms) and copy-back
+(~28 ms) set the frame. `VICTORY_SUBMIT_FRAMES=2` gives no speed and brings back waxy faces / heads of another colour
+(run 60; normal again without it, run 61): leave it unset. Marvisak/VIctory#3487 and #3484 do not apply (`bindless.rs`
+is not in this line).
+
 ## Ported from `speed-trial`
 
 | Commit there | Here | What |
