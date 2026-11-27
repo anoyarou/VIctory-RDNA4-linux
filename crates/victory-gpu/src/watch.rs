@@ -939,6 +939,7 @@ fn audit(first: usize, last: usize, written: &[(usize, u16)]) {
             && before != hash
             && !told
             && journal().notes.parts_since(page, at) == 0
+            && !written_since_asked(page)
         {
             section_count(SW_MISSED, 1);
             if SAID.fetch_add(1, Ordering::Relaxed) < 10 {
@@ -950,6 +951,28 @@ fn audit(first: usize, last: usize, written: &[(usize, u16)]) {
         }
         seen.insert(page, (hash, now));
     }
+}
+
+/// Diagnostics: whether the kernel says `page` (or another view of it) was
+/// written since its last asking, asked without resetting anything: a write
+/// that came between the audit's asking and its hash, which the next asking
+/// tells (not a miss).
+#[cfg(feature = "diagnostics")]
+fn written_since_asked(page: usize) -> bool {
+    use windows_sys::Win32::System::Memory::GetWriteWatch;
+    let mut at: Vec<usize> = vec![page * PAGE];
+    if section_watch() {
+        for (_, others) in elsewhere(page * PAGE, PAGE) {
+            at.extend(others);
+        }
+    }
+    at.into_iter().any(|addr| {
+        let mut found = [0usize; PAGE / KERNEL_PAGE];
+        let (mut count, mut granularity) = (found.len(), 0u32);
+        // SAFETY: the answer buffer holds `count` entries; nothing is reset.
+        let failed = unsafe { GetWriteWatch(0, addr as *const _, PAGE, found.as_mut_ptr().cast(), &mut count, &mut granularity) } != 0;
+        !failed && count != 0
+    })
 }
 
 /// The pages of `[first, last)` the kernel says were written since it was
