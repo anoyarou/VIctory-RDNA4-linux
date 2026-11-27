@@ -82,7 +82,7 @@ with, without this machine's paths; the window modes are verified (run 66), the 
 
 | Commit | What |
 |---|---|
-| `76f8581` | `VICTORY_AMBIENT=<share>,floor:<level>`: the ambient stand-in's estimate, never below beloooo's constant. Indoors without rays the estimate feeds on itself (dark walls send out little), and a room stayed too dark at `0.8`. Used as `0.8,floor:0.6`; no measurable frame cost. |
+| `76f8581` | `VICTORY_AMBIENT=<share>,floor:<level>`: the ambient stand-in's estimate, never below beloooo's constant. Indoors without rays the estimate feeds on itself (dark walls send out little), and a room stayed too dark at `0.8`. Used as `0.8,floor:0.6`; no measurable frame cost. **Dropped in run 90** (2026-11-27): with the floor, night scenes stayed lit, the exposure came down and the night sky went black; with `0.8` alone night outside matches a reference playthrough and rooms look right [user]. |
 | `fa54da3` | avatarmanz/VIctory-7900XTX#200 (`1b06b56`, amine23012004, after Kayotic1337 and zocram4cc on avatarmanz/VIctory-7900XTX#59): Wine refuses `NtQueryVirtualMemory` class 7, so no hole was ever known and each was asked about with `VirtualQuery` every frame (13,000-23,000 calls, reported). A private, reserved, `PAGE_NOACCESS` block now counts as a placeholder there. Reported: preparing 38-42 -> 24-28 ms on an RX 9070 XT. Here (run 43, with `FETCH_CHECK=1`, at the bunk, ~3,600 draws): **61-64 ms a frame (16 fps)**, against run 40's 64-68 ms at ~3,150 draws; write-watch asking 27-30 ms a frame against up to 78 ms. |
 
 ## Where the frame went (runs 34-37), and why it is gone

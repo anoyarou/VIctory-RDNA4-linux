@@ -17,8 +17,9 @@
 # again at no measured cost (avatarmanz/VIctory-7900XTX#13, #138, #148).
 : "${VICTORY_FETCH_CHECK:=1}"
 
-# Ambient stand-in without ray tracing: 0.8 of the estimate, never below 0.6 (rooms stay too dark otherwise).
-: "${VICTORY_AMBIENT:=0.8,floor:0.6}"
+# Ambient stand-in without ray tracing: 0.8 of the estimate. No floor: with ,floor:0.6 night scenes stayed lit,
+# the exposure came down and the night sky went black (run 90; rooms look right without it now).
+: "${VICTORY_AMBIENT:=0.8}"
 
 # Title buffers of 1 MiB and more keep their copy on the card (16 GB cards default to 4 MiB): 75 -> 67 ms
 # standing, ~130 -> ~29 MB compared a frame (idea from Belobug/VIctory-Belobug-AMD#444).
