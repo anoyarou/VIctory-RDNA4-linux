@@ -3,7 +3,8 @@
 # environment win, so any of them can be changed per launch: VICTORY_RELAY=1 ./run.sh ...
 # SETTINGS=0 skips this file.
 
-# The settings of the base's scripts/play.ps1 (Belobug/VIctory-Belobug-AMD `rx9070xt`), not -Safe,
+# The settings of the original base's scripts/play.ps1 (Belobug/VIctory-Belobug-AMD `rx9070xt`, no longer
+# on GitHub; the file is in this history), not -Safe,
 # without ray tracing: 575 -> ~300 ms a frame on this base (docs/linux-wine.md, runs 33-34).
 : "${VICTORY_TEXTURE_NO_WAIT:=1}" "${VICTORY_RELAY:=2}" "${VICTORY_WIDE_BACK:=1}" "${VICTORY_CARD_REHASH_RUNS:=1}"
 : "${VICTORY_JOIN_COPIES:=1}" "${VICTORY_INDIRECT_WINDOW:=1}" "${VICTORY_RELAY_COPY:=1}" "${VICTORY_CARD_STEPS:=2}"

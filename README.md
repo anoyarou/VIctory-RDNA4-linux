@@ -2,12 +2,17 @@
 
 A fork of [VIctory](https://github.com/Marvisak/VIctory), a compatibility layer
 that runs an Xbox Series title on a PC from files the user supplies. This one is
-about running it **on Linux under Wine/Proton, on an AMD RDNA 4 card**. Its base is
-[avatarmanz/VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX) (speed on
-RDNA 3, Windows) with [Belobug](https://github.com/Belobug/VIctory-Belobug-AMD)'s
-RX 9070 XT fixes (`rx9070xt` branch, `cd8dfc0`), plus what the Wine runs here needed, taken
-from those repositories, from Marvisak/VIctory and from our own measurements. It
-is playable, slowly.
+about running it **on Linux under Wine/Proton, on an AMD RDNA 4 card**. It is
+playable, slowly.
+
+**Upstream is [Marvisak/VIctory](https://github.com/Marvisak/VIctory)**: fixes are
+taken from there, and our own changes meant for everyone go there as pull requests.
+The tree started from avatarmanz/VIctory-7900XTX (speed on RDNA 3, Windows) with
+Belobug/VIctory-Belobug-AMD's RX 9070 XT fixes (`rx9070xt` branch, `cd8dfc0`). Both
+repositories are no longer reachable on GitHub (since 2026-11-27); everything taken
+from them is in this history with its authors, and the references to their pull
+requests (`avatarmanz/VIctory-7900XTX#…`, `Belobug/VIctory-Belobug-AMD#…`) name
+what was taken even where the links no longer open.
 
 **This repository contains no game files, code or assets.** You need your own
 copy of the game. It is not affiliated with or endorsed by the game's developer
@@ -130,6 +135,8 @@ Windows) are in [docs/findings.md](docs/findings.md).
 
 This is a tree of other people's work with a little more on top. The history is kept, and
 commits taken from elsewhere name the commit and its author.
+avatarmanz/VIctory-7900XTX and Belobug/VIctory-Belobug-AMD no longer open on GitHub
+(2026-11-27); their work is credited below as it was taken.
 
 - **[VIctory](https://github.com/Marvisak/VIctory)** by Marvisak and its
   contributors: the loader, the runtime services, the Direct3D 12 back end and

@@ -1,5 +1,10 @@
 # Running under Wine/Proton on Linux (notes for this branch)
 
+Upstream is now [Marvisak/VIctory](https://github.com/Marvisak/VIctory) (2026-11-27): the
+repositories this branch started from, avatarmanz/VIctory-7900XTX and Belobug/VIctory-Belobug-AMD,
+no longer open on GitHub. What follows is the history as it happened, with their commits and pull
+requests named as they were taken; the commits themselves are all in this branch.
+
 This branch, `rx9070xt-wine`, is Belobug/VIctory-Belobug-AMD's `rx9070xt` branch (the RX 7900 XTX
 fork, avatarmanz/VIctory-7900XTX, plus Belobug `81ebb7b` for the RX 9070 XT) with what our Wine runs
 needed ported from our earlier branch `speed-trial` (on Belobug `main`; archived as the tag
