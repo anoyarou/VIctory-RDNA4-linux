@@ -1076,6 +1076,7 @@ fn list_table(t: &mut [usize; hook::SLOTS]) {
         ID3D12GraphicsCommandList_Vtbl.SetPipelineState = set_pipeline
     );
     set!(t, ID3D12GraphicsCommandList_Vtbl.ResourceBarrier = barrier);
+    set!(t, ID3D12GraphicsCommandList7_Vtbl.Barrier = barrier_groups);
     set!(
         t,
         ID3D12GraphicsCommandList_Vtbl.SetDescriptorHeaps = set_heaps
@@ -1208,7 +1209,6 @@ fn list_rest(t: &mut [usize; hook::SLOTS]) -> &'static [(usize, &'static str)] {
         ID3D12GraphicsCommandList4_Vtbl.DispatchRays,
         ID3D12GraphicsCommandList5_Vtbl.RSSetShadingRate,
         ID3D12GraphicsCommandList5_Vtbl.RSSetShadingRateImage,
-        ID3D12GraphicsCommandList7_Vtbl.Barrier,
         ID3D12GraphicsCommandList8_Vtbl.OMSetFrontAndBackStencilRef,
         ID3D12GraphicsCommandList9_Vtbl.RSSetDepthBias,
         ID3D12GraphicsCommandList9_Vtbl.IASetIndexBufferStripCutValue,
@@ -2335,6 +2335,37 @@ unsafe extern "system" fn barrier(this: Ptr, n: u32, all: *const D3D12_RESOURCE_
                 })
                 .collect();
             Cmd::Barriers { all }
+        });
+    }
+}
+
+/// `ID3D12GraphicsCommandList7::Barrier` (enhanced barriers). Our own
+/// waits use it under Wine (`VICTORY_CLAMP_SYNC` in `indirect.rs`, the
+/// placed-texture copies in `host/place.rs`), all of them global groups; a
+/// replay without them let the indirect clamps race the draws they feed.
+/// Played as one global UAV barrier, a wait at least as strong as any
+/// global sync/access pair asked for. Buffer and texture groups (none are
+/// made today) are noted as a problem: a texture layout change has no
+/// `ResourceBarrier` form here.
+unsafe extern "system" fn barrier_groups(this: Ptr, n: u32, groups: *const D3D12_BARRIER_GROUP) {
+    // SAFETY: as above; the group's type says which pointer it holds.
+    unsafe {
+        own!(this, ID3D12GraphicsCommandList7_Vtbl.Barrier)(this, n, groups);
+        if n == 0 || groups.is_null() {
+            return;
+        }
+        note_change(this, |r| {
+            for g in std::slice::from_raw_parts(groups, n as usize) {
+                if g.Type != D3D12_BARRIER_TYPE_GLOBAL && g.NumBarriers != 0 {
+                    r.problem("a buffer or texture enhanced barrier was played as a global one");
+                }
+            }
+            Cmd::Barriers {
+                all: vec![Barrier::Uav {
+                    flags: 0,
+                    res: NONE,
+                }],
+            }
         });
     }
 }
