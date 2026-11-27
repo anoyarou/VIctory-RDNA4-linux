@@ -146,10 +146,14 @@ Cherry-picked on `725c580` (each commit names its PR):
 - avatarmanz/VIctory-7900XTX#423 (`VICTORY_FILE_CACHE`, on), #447 (`VICTORY_KEEP_PAGES`, off), #448, #443
   (`VICTORY_LIBRARY_PREFETCH`, off), #446; Belobug/VIctory-Belobug-AMD#512, #518. Carried over, not measured one by one.
 
-Measured: ~71-72 ms a frame standing at ~4,600 draws (run 59); the card is idle, preparing (~61 ms) and copy-back
-(~28 ms) set the frame. `VICTORY_SUBMIT_FRAMES=2` gives no speed and brings back waxy faces / heads of another colour
+Measured: ~71-72 ms a frame standing at ~4,600 draws (run 59); "on the GPU" ~0 (only a synchronous wait, see #429 below), preparing (~61 ms) and copy-back
+(~28 ms). `VICTORY_SUBMIT_FRAMES=2` gives no speed and brings back waxy faces / heads of another colour
 (run 60; normal again without it, run 61): leave it unset. Marvisak/VIctory#3487 and #3484 do not apply (`bindless.rs`
 is not in this line).
+
+Then avatarmanz/VIctory-7900XTX#429 (`f92ad0e`, 3 commits, clean; instrumentation, off by default):
+`VICTORY_CRITICAL_PATH=1` gives one line a frame with the three chains and the refresh flushes; the fps line ends with
+the card's busy ms/frame by our fence clock. Built, not run yet.
 
 ## Ported from `speed-trial`
 
