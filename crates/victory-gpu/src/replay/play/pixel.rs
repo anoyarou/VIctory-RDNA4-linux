@@ -26,34 +26,34 @@ pub struct Pixels {
 }
 
 /// Bytes a sample has.
-const ROOM: u64 = 512;
+pub(super) const ROOM: u64 = 512;
 /// The most samples of one run.
 const MOST: usize = 1 << 20;
 
 #[derive(Clone, Debug)]
-struct Sample {
-    list: u32,
-    command: usize,
+pub(super) struct Sample {
+    pub(super) list: u32,
+    pub(super) command: usize,
     /// Of a split draw: which one.
-    part: u32,
-    before: bool,
-    spot: Spot,
-    pso: u32,
-    what: &'static str,
+    pub(super) part: u32,
+    pub(super) before: bool,
+    pub(super) spot: Spot,
+    pub(super) pso: u32,
+    pub(super) what: &'static str,
 }
 
 /// A texture's part that a sample can be taken from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct Spot {
-    res: u32,
-    sub: u32,
-    x: u32,
-    y: u32,
-    z: u32,
+pub(super) struct Spot {
+    pub(super) res: u32,
+    pub(super) sub: u32,
+    pub(super) x: u32,
+    pub(super) y: u32,
+    pub(super) z: u32,
     /// The point of the picture it stands for (or [`OWN`]).
-    point: usize,
-    format: i32,
-    depth: bool,
+    pub(super) point: usize,
+    pub(super) format: i32,
+    pub(super) depth: bool,
 }
 
 /// In [`Spot::point`]: a texel asked for by itself.
@@ -98,7 +98,7 @@ fn small(bits: u32, mantissa: u32) -> f32 {
 }
 
 /// Bytes of a texel of a format; 0 for formats not read.
-fn texel_bytes(format: i32) -> usize {
+pub(super) fn texel_bytes(format: i32) -> usize {
     match format {
         1..=4 => 16,
         5..=8 => 12,
@@ -112,7 +112,7 @@ fn texel_bytes(format: i32) -> usize {
 }
 
 /// A texel in words.
-fn texel_text(format: i32, b: &[u8]) -> String {
+pub(super) fn texel_text(format: i32, b: &[u8]) -> String {
     let n = texel_bytes(format);
     if n == 0 || b.len() < n {
         return format!("{b:02x?}");
@@ -206,7 +206,7 @@ struct Textures {
 }
 
 impl Player {
-    fn texture(&self, id: u32) -> Option<&wire::Resource> {
+    pub(super) fn texture(&self, id: u32) -> Option<&wire::Resource> {
         let o = self.objects.get(&id)?;
         let r = &self.frame.resources[o.index];
         (r.desc.dimension != D3D12_RESOURCE_DIMENSION_BUFFER.0 && r.desc.samples[0] <= 1)
@@ -583,7 +583,7 @@ impl Player {
     }
 
     /// The frame's lists with copies of texels after commands.
-    fn sampled(
+    pub(super) fn sampled(
         &mut self,
         p: &Pixels,
         submits: &[Vec<Vec<Cmd>>],

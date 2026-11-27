@@ -103,6 +103,7 @@ resolves and clears. `--of` is the size of the picture the point was read from
 | `--targets-only` | no textures of unordered access: fewer copies |
 | `--split <list>:<command>` | the draws of that indirect call one by one, each named |
 | `--lists 40..80` | only these lists are looked into |
+| `--reads <list>:<command>` | which texture slots that draw reads under the points: the heap's texture views (of the draw's heap version) are made to read as a constant (same texture, channels forced to 1, then 0) in groups that are halved while they change the draw's targets there; the frame runs up to the draw. Lists the slots, their textures and what each changes, and the slots around them. Textures the card writes are left out unless `--reads-all`; slots that hold no texture (empty, null) cannot be found this way |
 
 A texture that was changed by what is not looked into is reported as "changed
 unseen". Copies of 3D textures' targets are of the slice drawn to.

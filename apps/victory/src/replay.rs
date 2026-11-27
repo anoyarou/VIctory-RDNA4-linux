@@ -207,6 +207,14 @@ pub(crate) struct Replay {
     /// `<list>:<command>` (repeatable).
     #[arg(long)]
     split: Vec<String>,
+    /// With --pixel: which texture slots the draw `<list>:<command>` reads
+    /// under the points (each slot read as a constant in turn, in halving
+    /// groups; the frame runs up to the draw).
+    #[arg(long)]
+    reads: Option<String>,
+    /// With --reads: textures the card writes in the frame too.
+    #[arg(long)]
+    reads_all: bool,
     /// Take shaders from this folder where it has them (`<hash>.dxil`, by the
     /// hash the runtime names the title's shader by).
     #[arg(long)]
@@ -391,6 +399,13 @@ pub(crate) fn run(r: Replay) -> Result<()> {
             pixels
                 .split
                 .push(pair(text, ':').with_context(|| format!("--split {text}"))?);
+        }
+        if let Some(text) = &r.reads {
+            let reads = play::reads::Reads {
+                draw: pair(text, ':').with_context(|| format!("--reads {text}"))?,
+                all: r.reads_all,
+            };
+            return player.reads(&options, &pixels, &reads, &mut |line| println!("{line}"));
         }
         return player.pixel(&options, &pixels, &mut |line| println!("{line}"));
     }

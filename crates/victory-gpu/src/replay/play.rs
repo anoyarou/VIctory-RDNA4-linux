@@ -33,6 +33,7 @@ pub mod diverge;
 pub mod look;
 mod merge;
 pub mod pixel;
+pub mod reads;
 mod upcopies;
 
 /// The name of the argument clamp's pipeline, by which its passes are
@@ -550,6 +551,9 @@ pub struct Player {
     /// Descriptor heaps by id, in their versions; each submission's version.
     descriptors: HashMap<u32, (Vec<Version>, u64)>,
     version_of: Vec<usize>,
+    /// What each version of the heaps changes against the one before:
+    /// heap, slot, view.
+    changes: Vec<Vec<(u32, u32, Slot)>>,
     /// Render target and depth views by what they are of.
     targets: HashMap<Slot, D3D12_CPU_DESCRIPTOR_HANDLE>,
     _target_heaps: Vec<ID3D12DescriptorHeap>,
@@ -631,6 +635,7 @@ impl Player {
             queries: HashMap::new(),
             descriptors: HashMap::new(),
             version_of: Vec::new(),
+            changes: Vec::new(),
             targets: HashMap::new(),
             _target_heaps: Vec::new(),
             masters: Vec::new(),
@@ -1298,6 +1303,7 @@ impl Player {
             }
         }
         self.descriptors = made;
+        self.changes = versions.clone();
         if versions.len() > 1 {
             self.notes.push(format!(
                 "{} versions of the descriptor heaps (views replaced during the frame)",
