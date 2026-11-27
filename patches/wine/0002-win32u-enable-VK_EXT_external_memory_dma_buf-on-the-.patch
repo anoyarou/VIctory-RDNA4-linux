@@ -1,0 +1,60 @@
+From e745ae2f92c137159fbdca1cfaa6ee8fda1cd70d Mon Sep 17 00:00:00 2001
+From: Anoyarou <anoyarou@tuta.com>
+Date: Sat, 28 Nov 2026 01:04:20 +0200
+Subject: [PATCH 2/2] win32u: enable VK_EXT_external_memory_dma_buf on the host
+ device for section imports
+
+The host device got only VK_KHR_external_memory_fd for win32 memory
+handles, so 163f403's dma-buf import was never tried (runs 110-112).
+Also warns on its silent early exits.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dlls/win32u/vulkan.c | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/win32u/vulkan.c b/dlls/win32u/vulkan.c
+index 5b05fe3..a4b0895 100644
+--- a/dlls/win32u/vulkan.c
++++ b/dlls/win32u/vulkan.c
+@@ -1328,6 +1328,9 @@ static VkResult convert_device_create_info( struct vulkan_physical_device *physi
+ 
+     if (device->extensions.has_VK_EXT_external_memory_dma_buf)
+         device->extensions.has_VK_KHR_external_memory_fd = 1;
++    /* sections are imported as dma-bufs (section_dma_buf): enable it beside the fd memory win32 handles map to */
++    if (device->extensions.has_VK_KHR_external_memory_fd && physical_device->extensions.has_VK_EXT_external_memory_dma_buf)
++        device->extensions.has_VK_EXT_external_memory_dma_buf = 1;
+ 
+     if (physical_device->map_placed_align)
+     {
+@@ -1592,10 +1595,17 @@ static int section_dma_buf( HANDLE handle, VkDeviceSize size )
+     struct { int memfd; unsigned int flags; unsigned long long offset, size; } create;
+     int fd, dev, buf;
+ 
+-    if (wine_server_handle_to_fd( handle, 0, &fd, NULL )) return -1;
++    NTSTATUS status;
++
++    if ((status = wine_server_handle_to_fd( handle, 0, &fd, NULL )))
++    {
++        WARN( "section %p: no fd, status %#x\n", handle, (int)status );
++        return -1;
++    }
+     /* only memfds answer F_GET_SEALS: other objects (D3DKMT resources) keep their own path */
+     if (fcntl( fd, 1034 /* F_GET_SEALS */ ) < 0)
+     {
++        WARN( "section %p: fd %d answers no F_GET_SEALS: %s\n", handle, fd, strerror( errno ) );
+         close( fd );
+         return -1;
+     }
+@@ -1701,6 +1711,8 @@ static VkResult win32u_vkAllocateMemory( VkDevice client_device, const VkMemoryA
+         {
+             HANDLE shared = import_win32->handle;
+             /* a section (memfd) goes in as a dma-buf, ahead of the D3DKMT path */
++            if (!import_win32->name && !device->extensions.has_VK_EXT_external_memory_dma_buf)
++                WARN( "no VK_EXT_external_memory_dma_buf on the host device: sections are not imported as dma-bufs\n" );
+             if (!import_win32->name && device->extensions.has_VK_EXT_external_memory_dma_buf &&
+                 (section_buf = section_dma_buf( import_win32->handle, alloc_info->allocationSize )) >= 0)
+                 break;
+-- 
+2.56.1
+

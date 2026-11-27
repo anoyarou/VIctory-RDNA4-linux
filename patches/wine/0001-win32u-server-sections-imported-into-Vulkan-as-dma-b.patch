@@ -1,0 +1,147 @@
+From 163f403340f9a778abd95e51690a54c70dd1f287 Mon Sep 17 00:00:00 2001
+From: Anoyarou <anoyarou@tuta.com>
+Date: Sat, 28 Nov 2026 00:54:24 +0200
+Subject: [PATCH 1/2] win32u, server: sections imported into Vulkan as dma-bufs
+ (udmabuf)
+
+wineserver makes its section memfds sealable; win32u's vkAllocateMemory
+turns an imported section handle into a dma-buf through /dev/udmabuf and
+imports that, ahead of the D3DKMT path. A heap opened on a section is then
+no userptr, which amdgpu walks page by page at every command submission
+(RetailTitleCompat CPU-BOTTLENECK-ANALYSIS.md sections 12-13).
+
+After LeanWasTaken/VIctory-bc250 a25f6ad and 9b6b938 (patches/wine).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dlls/win32u/vulkan.c | 63 +++++++++++++++++++++++++++++++++++++++++++-
+ server/mapping.c     |  2 +-
+ 2 files changed, 63 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/win32u/vulkan.c b/dlls/win32u/vulkan.c
+index 5401c56..5b05fe3 100644
+--- a/dlls/win32u/vulkan.c
++++ b/dlls/win32u/vulkan.c
+@@ -29,6 +29,10 @@
+ #include <pthread.h>
+ #include <unistd.h>
+ #include <assert.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <string.h>
++#include <sys/ioctl.h>
+ 
+ #include "ntstatus.h"
+ #define WIN32_NO_STATUS
+@@ -1578,6 +1582,44 @@ static void set_transient_client_handle(struct vulkan_instance *instance, uint64
+     *handle = client_handle;
+ }
+ 
++/* A section handle (wineserver backs sections with memfds) as a dma-buf
++ * through udmabuf, so that the card and every view of the section share the
++ * same pages: no userptr, which amdgpu walks page by page at every command
++ * submission. -1 if the handle is no such section or udmabuf refuses it.
++ * After LeanWasTaken/VIctory-bc250 a25f6ad and 9b6b938. */
++static int section_dma_buf( HANDLE handle, VkDeviceSize size )
++{
++    struct { int memfd; unsigned int flags; unsigned long long offset, size; } create;
++    int fd, dev, buf;
++
++    if (wine_server_handle_to_fd( handle, 0, &fd, NULL )) return -1;
++    /* only memfds answer F_GET_SEALS: other objects (D3DKMT resources) keep their own path */
++    if (fcntl( fd, 1034 /* F_GET_SEALS */ ) < 0)
++    {
++        close( fd );
++        return -1;
++    }
++    /* udmabuf takes only memfds that cannot shrink */
++    if (fcntl( fd, 1033 /* F_ADD_SEALS */, 0x0002 /* F_SEAL_SHRINK */ ) && errno != EPERM)
++        WARN( "sealing section %p failed: %s\n", handle, strerror( errno ) );
++    if ((dev = open( "/dev/udmabuf", O_RDWR | O_CLOEXEC )) < 0)
++    {
++        WARN( "no /dev/udmabuf: %s\n", strerror( errno ) );
++        close( fd );
++        return -1;
++    }
++    create.memfd = fd;
++    create.flags = 0x01; /* UDMABUF_FLAGS_CLOEXEC */
++    create.offset = 0;
++    create.size = (size + 4095) & ~(VkDeviceSize)4095;
++    buf = ioctl( dev, _IOW( 'u', 0x42, create ) /* UDMABUF_CREATE */, &create );
++    if (buf < 0) WARN( "udmabuf refused section %p (%#llx bytes): %s\n", handle, create.size, strerror( errno ) );
++    else WARN( "section %p imported as dma-buf %d, %#llx bytes\n", handle, buf, create.size );
++    close( dev );
++    close( fd );
++    return buf;
++}
++
+ static VkResult win32u_vkAllocateMemory( VkDevice client_device, const VkMemoryAllocateInfo *client_alloc_info,
+                                          const VkAllocationCallbacks *allocator, VkDeviceMemory *ret )
+ {
+@@ -1594,6 +1636,7 @@ static VkResult win32u_vkAllocateMemory( VkDevice client_device, const VkMemoryA
+     VkExportMemoryAllocateInfo *export_info = NULL;
+     struct device_memory *memory;
+     BOOL nt_shared = FALSE;
++    int section_buf = -1;
+     uint32_t mem_flags;
+     void *mapping = NULL;
+     VkResult res;
+@@ -1657,6 +1700,10 @@ static VkResult win32u_vkAllocateMemory( VkDevice client_device, const VkMemoryA
+         case VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT:
+         {
+             HANDLE shared = import_win32->handle;
++            /* a section (memfd) goes in as a dma-buf, ahead of the D3DKMT path */
++            if (!import_win32->name && device->extensions.has_VK_EXT_external_memory_dma_buf &&
++                (section_buf = section_dma_buf( import_win32->handle, alloc_info->allocationSize )) >= 0)
++                break;
+             if (import_win32->name && !(shared = open_shared_resource_from_name( import_win32->name ))) break;
+             memory->local = d3dkmt_open_resource( 0, shared, &memory->mutex, &memory->sync );
+             if (shared && shared != import_win32->handle) NtClose( shared );
+@@ -1667,6 +1714,15 @@ static VkResult win32u_vkAllocateMemory( VkDevice client_device, const VkMemoryA
+             break;
+         }
+ 
++        if (section_buf >= 0)
++        {
++            fd_info.fd = section_buf;
++            fd_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
++            fd_info.pNext = alloc_info->pNext;
++            alloc_info->pNext = &fd_info;
++            goto import_ready;
++        }
++
+         if (device->client.device->extensions.has_VK_KHR_win32_keyed_mutex && memory->sync)
+         {
+             VkSemaphoreTypeCreateInfo semaphore_type = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
+@@ -1697,9 +1753,14 @@ static VkResult win32u_vkAllocateMemory( VkDevice client_device, const VkMemoryA
+         fd_info.pNext = alloc_info->pNext;
+         alloc_info->pNext = &fd_info;
+     }
++import_ready:
+ 
+     set_transient_client_handle(instance, (uintptr_t)&memory->obj.obj);
+-    if ((res = device->p_vkAllocateMemory( device->host.device, alloc_info, NULL, &host_device_memory ))) goto failed;
++    if ((res = device->p_vkAllocateMemory( device->host.device, alloc_info, NULL, &host_device_memory )))
++    {
++        if (section_buf >= 0) close( section_buf );
++        goto failed;
++    }
+ 
+     if (export_info)
+     {
+diff --git a/server/mapping.c b/server/mapping.c
+index 8ac79b8..b38ad25 100644
+--- a/server/mapping.c
++++ b/server/mapping.c
+@@ -393,7 +393,7 @@ static int create_temp_file( file_pos_t size )
+     int fd;
+ 
+ #if defined(HAVE_MEMFD_CREATE) && defined(MFD_EXEC)
+-    if ((fd = memfd_create( "wine-mapping", MFD_EXEC )) != -1)
++    if ((fd = memfd_create( "wine-mapping", MFD_EXEC | MFD_ALLOW_SEALING )) != -1)
+     {
+         if (grow_file( fd, size )) return fd;
+         close( fd );
+-- 
+2.56.1
+

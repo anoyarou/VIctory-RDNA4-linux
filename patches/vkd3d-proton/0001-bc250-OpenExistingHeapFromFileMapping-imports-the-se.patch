@@ -1,0 +1,160 @@
+From e691b2dd9f0482d9a9abb546dbe5828ea4f349c2 Mon Sep 17 00:00:00 2001
+From: LeanWasTaken <37744158+LeanWasTaken@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 18:42:53 +0200
+Subject: [PATCH 1/3] bc250: OpenExistingHeapFromFileMapping imports the
+ section as the heap
+
+---
+ libs/vkd3d/device.c        | 33 ++++++++++++++++++++++++++++++
+ libs/vkd3d/heap.c          | 41 ++++++++++++++++++++++++++++++++++++--
+ libs/vkd3d/memory.c        |  1 +
+ libs/vkd3d/vkd3d_private.h |  3 +++
+ 4 files changed, 76 insertions(+), 2 deletions(-)
+
+diff --git a/libs/vkd3d/device.c b/libs/vkd3d/device.c
+index 60b12c4..fdec432 100644
+--- a/libs/vkd3d/device.c
++++ b/libs/vkd3d/device.c
+@@ -7640,6 +7640,39 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_OpenExistingHeapFromFileMapping(d3
+     if (!addr)
+         return E_INVALIDARG;
+ 
++    /* bc250: the section itself, imported (Wine: as a dma-buf), not a host
++     * pointer to a view that is unmapped right after. */
++    {
++        struct d3d12_device *device = impl_from_ID3D12Device(iface);
++        MEMORY_BASIC_INFORMATION info;
++        D3D12_HEAP_DESC heap_desc;
++        struct d3d12_heap *object;
++
++        if (!VirtualQuery(addr, &info, sizeof(info)))
++        {
++            UnmapViewOfFile(addr);
++            return E_INVALIDARG;
++        }
++        UnmapViewOfFile(addr);
++
++        memset(&heap_desc, 0, sizeof(heap_desc));
++        heap_desc.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
++        heap_desc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
++        heap_desc.Properties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_BACK;
++        heap_desc.Properties.MemoryPoolPreference = D3D12_MEMORY_POOL_L0;
++        heap_desc.Properties.Type = D3D12_HEAP_TYPE_CUSTOM;
++        heap_desc.Properties.CreationNodeMask = 1;
++        heap_desc.Properties.VisibleNodeMask = 1;
++        heap_desc.SizeInBytes = info.RegionSize;
++
++        if (SUCCEEDED(hr = d3d12_heap_create_imported(device, &heap_desc, file_mapping, &object)))
++            return return_interface(&object->ID3D12Heap_iface, &IID_ID3D12Heap, riid, heap);
++        WARN("Importing file mapping %p as a heap failed, hr %#x; falling back to its address.\n", file_mapping, hr);
++    }
++
++    addr = MapViewOfFile(file_mapping, FILE_MAP_ALL_ACCESS, 0, 0, 0);
++    if (!addr)
++        return E_INVALIDARG;
+     hr = d3d12_device_OpenExistingHeapFromAddress(iface, addr, riid, heap);
+     UnmapViewOfFile(addr);
+     return hr;
+diff --git a/libs/vkd3d/heap.c b/libs/vkd3d/heap.c
+index 341e3e5..5099ee1 100644
+--- a/libs/vkd3d/heap.c
++++ b/libs/vkd3d/heap.c
+@@ -300,7 +300,7 @@ static HRESULT validate_heap_desc(struct d3d12_device *device, const D3D12_HEAP_
+ }
+ 
+ static HRESULT d3d12_heap_init(struct d3d12_heap *heap, struct d3d12_device *device,
+-        const D3D12_HEAP_DESC *desc, void* host_address)
++        const D3D12_HEAP_DESC *desc, void* host_address, const void *import_next)
+ {
+     struct vkd3d_allocate_heap_memory_info alloc_info;
+     HRESULT hr;
+@@ -329,6 +329,7 @@ static HRESULT d3d12_heap_init(struct d3d12_heap *heap, struct d3d12_device *dev
+     memset(&alloc_info, 0, sizeof(alloc_info));
+     alloc_info.heap_desc = heap->desc;
+     alloc_info.host_ptr = host_address;
++    alloc_info.pNext = import_next;
+ 
+     if ((alloc_info.heap_desc.Flags & D3D12_HEAP_FLAG_DENY_BUFFERS) &&
+         d3d12_device_allow_image_heap_suballocation(device))
+@@ -412,7 +413,7 @@ HRESULT d3d12_heap_create(struct d3d12_device *device, const D3D12_HEAP_DESC *de
+     if (!(object = vkd3d_malloc(sizeof(*object))))
+         return E_OUTOFMEMORY;
+ 
+-    if (FAILED(hr = d3d12_heap_init(object, device, desc, host_address)))
++    if (FAILED(hr = d3d12_heap_init(object, device, desc, host_address, NULL)))
+     {
+         vkd3d_free(object);
+         return hr;
+@@ -423,3 +424,39 @@ HRESULT d3d12_heap_create(struct d3d12_device *device, const D3D12_HEAP_DESC *de
+     *heap = object;
+     return S_OK;
+ }
++
++/* bc250: a heap on memory a Win32 handle names (a section: Wine imports it
++ * as a dma-buf, so the heap and the section's views are the same pages). */
++HRESULT d3d12_heap_create_imported(struct d3d12_device *device, const D3D12_HEAP_DESC *desc,
++        HANDLE handle, struct d3d12_heap **heap)
++{
++#ifdef _WIN32
++    VkImportMemoryWin32HandleInfoKHR import_info;
++#endif
++    struct d3d12_heap *object;
++    HRESULT hr;
++
++#ifndef _WIN32
++    return E_NOTIMPL;
++#else
++    import_info.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR;
++    import_info.pNext = NULL;
++    import_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
++    import_info.handle = handle;
++    import_info.name = NULL;
++
++    if (!(object = vkd3d_malloc(sizeof(*object))))
++        return E_OUTOFMEMORY;
++
++    if (FAILED(hr = d3d12_heap_init(object, device, desc, NULL, &import_info)))
++    {
++        vkd3d_free(object);
++        return hr;
++    }
++
++    TRACE("Created heap %p.\n", object);
++
++    *heap = object;
++    return S_OK;
++#endif
++}
+diff --git a/libs/vkd3d/memory.c b/libs/vkd3d/memory.c
+index 4530073..393ef45 100644
+--- a/libs/vkd3d/memory.c
++++ b/libs/vkd3d/memory.c
+@@ -2335,6 +2335,7 @@ HRESULT vkd3d_allocate_heap_memory(struct d3d12_device *device, struct vkd3d_mem
+     alloc_info.heap_properties = info->heap_desc.Properties;
+     alloc_info.heap_flags = info->heap_desc.Flags;
+     alloc_info.host_ptr = info->host_ptr;
++    alloc_info.pNext = info->pNext;
+     alloc_info.vk_memory_priority = info->vk_memory_priority;
+     alloc_info.explicit_global_buffer_usage = info->explicit_global_buffer_usage;
+ 
+diff --git a/libs/vkd3d/vkd3d_private.h b/libs/vkd3d/vkd3d_private.h
+index 38d2a13..668b579 100644
+--- a/libs/vkd3d/vkd3d_private.h
++++ b/libs/vkd3d/vkd3d_private.h
+@@ -822,6 +822,7 @@ struct vkd3d_allocate_heap_memory_info
+ {
+     D3D12_HEAP_DESC heap_desc;
+     void *host_ptr;
++    const void *pNext;
+     uint32_t extra_allocation_flags;
+     float vk_memory_priority;
+     VkBufferUsageFlags2KHR explicit_global_buffer_usage;
+@@ -1064,6 +1065,8 @@ struct d3d12_heap
+ 
+ HRESULT d3d12_heap_create(struct d3d12_device *device, const D3D12_HEAP_DESC *desc,
+         void *host_address, struct d3d12_heap **heap);
++HRESULT d3d12_heap_create_imported(struct d3d12_device *device, const D3D12_HEAP_DESC *desc,
++        HANDLE handle, struct d3d12_heap **heap);
+ HRESULT d3d12_device_validate_custom_heap_type(struct d3d12_device *device,
+         const D3D12_HEAP_PROPERTIES *heap_properties);
+ 

@@ -334,3 +334,44 @@ Beqren's raw typed loads (`1711cd1c2`, `VICTORY_RAW_TYPED_LOADS`, on), as border
 carries them; on Radeon under Proton #114 alone tears the mouths (Fedalv, comments on #114). Mouths
 move [user]; at the bunk at ~7,000 draws 72.5-76 ms a frame against run 45's 72-75 ms [measured]. The
 first run translates every shader again (new `TRANSLATOR_VERSION`): ~90 s of slow frames.
+
+## Port 1 as a dma-buf (2026-11-28, runs 108-121, RX 9070 XT, PCIe 3.0)
+
+What made renderer port 1 (`VICTORY_PORT_CONSTANTS=1`) slow under Wine, and what fixed it. Clothes shop, standing,
+~8,000 draws.
+
+| Setup | Frame (median) |
+|---|---|
+| Port 1 off | 58.0 ms (run 115) |
+| Port 1, home heap as userptr (`VICTORY_PORT_HOME`) | 150+ ms (run 108) |
+| Port 1, section as dma-buf, clamps alone | ~66 ms (runs 114, 116) |
+| **Port 1, section as dma-buf, `VICTORY_PORT_CONSTANTS_ORDER_BATCH=1`** | **50.6 ms (run 121)** |
+
+1. **The userptr walk:** a heap opened on an address is a userptr buffer. amdgpu walks all its pages
+   (`amdgpu_hmm_range_get_pages`) at every command submission, holding the process's `mmap_lock`: ~700 a second at
+   1.6 ms each for the 185 MB heap, with every `mprotect`, `mmap` and page fault queued behind it (perf probes, run
+   108).
+2. **The fix:** `VICTORY_PORT_SECTION=1` opens the heap on the section itself (`OpenExistingHeapFromFileMapping`,
+   home path off). With `patches/wine` and `patches/vkd3d-proton`, Wine turns the section's memfd into a dma-buf
+   (udmabuf), which amdgpu maps once. The walks went to 0, and `mprotect` lock waits fell from 6.2 s to 6 ms per
+   10 s (run 114). A probe checks that the card reads the section; if not, the stretch is copied as before.
+3. **The clamps:** with port 1, each indirect execution whose arguments are in place is clamped alone, between two
+   full waits (`draw.rs` `in_place_order`). RGP showed 2,569 such clamps a frame, and the card's time per frame at
+   22.7 ms against 12.1 ms with port 1 off (runs 119-120). `VICTORY_PORT_CONSTANTS_ORDER_BATCH=1` clamps each run
+   of them in one pass (avatarmanz/VIctory-7900XTX#438): the GPU wait goes from 11-12 ms to 0. No plant pop-in at
+   the clothes shop; the boat cutscene, where it showed before, is not yet checked.
+
+Run with: `VICTORY_PORT_CONSTANTS=1 VICTORY_PORT_SECTION=1 VICTORY_PORT_CONSTANTS_ORDER_BATCH=1`, the patched Proton
+and `d3d12core.dll`. Still open: the draws are 9-22 % slower with port 1 (constants read over PCIe 3.0 from
+system memory, unconfirmed).
+
+### Future work (after run 121)
+- Check the boat cutscene for plant pop-in with `ORDER_BATCH=1`, then make the three settings and the patched Proton
+  the default in `scripts/linux/`.
+- A/B `VICTORY_PORT_CBV=1`, the `ORDER_BATCH` limit and `VICTORY_CARD_AWAKE=0`: they only mean something now that
+  port 1 works.
+- The submitting thread sets the frame again (preparing ~43 of ~52 ms; copies 22.5 ms, 43 MB): profile it. Other
+  sections of title memory could go in place as dma-bufs too, once page-pool remaps are handled.
+- Fewer kernel submissions (~3.5 per submission of ours); the draws' 9-22 % slowdown over PCIe 3.0, only once the
+  card limits the frame.
+- Rebase `patches/wine` with each Proton update (configure with Vulkan).
