@@ -359,6 +359,23 @@ impl Player {
             // The planes of depth formats come back as these.
             let format = if matches!(f.Format.0, 39 | 53 | 60) { f.Format.0 } else { own };
             let Some(bytes) = texel_bytes(format) else {
+                // Block-compressed formats DDS readers know: the blocks as
+                // a `.dds` file.
+                if let Some(dds) = dds_of(format, &f) {
+                    let Some(all) = self.contents_of(id, sub)? else {
+                        continue;
+                    };
+                    let mut out = dds;
+                    let (row, rows) = (f.Width.div_ceil(4) as usize * block_bytes(format), f.Height.div_ceil(4) as usize);
+                    for y in 0..rows {
+                        let from = y * f.RowPitch as usize;
+                        out.extend_from_slice(&all[from..from + row]);
+                    }
+                    let file = images.folder.join(format!("{id:05}.{sub}.dds"));
+                    std::fs::write(&file, &out)?;
+                    say(format!("{called}.{sub}: {}x{} blocks in {}", f.Width, f.Height, file.display()));
+                    continue;
+                }
                 say(format!("{called}.{sub}: format {format} is not shown"));
                 continue;
             };
@@ -450,4 +467,43 @@ mod tests {
         assert_eq!(texel(24, &(1023u32 << 10).to_le_bytes()), [0.0, 1.0, 0.0, 0.0]);
         assert!(texel(54, &[1, 0x7c])[0].is_nan());
     }
+}
+
+/// Bytes of a 4x4 block of BC1-BC3.
+fn block_bytes(format: i32) -> usize {
+    if matches!(format, 70..=72) { 8 } else { 16 }
+}
+
+/// A DDS header (legacy FourCC) for one level of BC1, BC2 or BC3.
+fn dds_of(format: i32, f: &D3D12_SUBRESOURCE_FOOTPRINT) -> Option<Vec<u8>> {
+    let four: &[u8; 4] = match format {
+        70..=72 => b"DXT1",
+        73..=75 => b"DXT3",
+        76..=78 => b"DXT5",
+        _ => return None,
+    };
+    let mut h = Vec::with_capacity(128);
+    let mut put = |v: u32| h.extend_from_slice(&v.to_le_bytes());
+    put(0x2053_4444); // "DDS "
+    put(124);
+    put(0x1 | 0x2 | 0x4 | 0x1000 | 0x8_0000); // caps, height, width, pixel format, linear size
+    put(f.Height);
+    put(f.Width);
+    put((f.Width.div_ceil(4) * f.Height.div_ceil(4)) * block_bytes(format) as u32);
+    put(0); // depth
+    put(1); // levels
+    for _ in 0..11 {
+        put(0);
+    }
+    put(32);
+    put(0x4); // FourCC
+    put(u32::from_le_bytes(*four));
+    for _ in 0..5 {
+        put(0);
+    }
+    put(0x1000); // a texture
+    for _ in 0..4 {
+        put(0);
+    }
+    Some(h)
 }
