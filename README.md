@@ -13,7 +13,7 @@ is playable, slowly.
 copy of the game. It is not affiliated with or endorsed by the game's developer
 or publisher.
 
-## Where it stands (2026-11-26)
+## Where it stands (2026-11-27)
 
 Tested on one machine only:
 
@@ -22,20 +22,23 @@ Tested on one machine only:
 | CPU | AMD Ryzen 9 5950X (16 cores, 32 threads) |
 | GPU | AMD Radeon RX 9070 XT, 16 GB (Navi 48, GFX1201) |
 | RAM | 32 GB, plus 32 GB of swap (8 GB zram, 24 GB file) |
-| OS | Fedora 44, kernel 7.3.4, KDE Plasma 6.8.3 on Wayland |
+| OS | Fedora 44, kernel 7.3.5, KDE Plasma 6.8.3 on Wayland |
 | Driver | Mesa 26.2.7 RADV |
 | Wine | Proton Experimental `experimental-11.0-20261112` with a patched wineserver (view tree, Wine bug 60868), inside gamescope at 1600x900 |
 | Direct3D 12 | vkd3d-proton's `d3d12core.dll` rebuilt with dxil-spirv `b540c8a2` (see below) |
-| Profile | Series X, from a save |
+| Profile | Series X, from a save (after the first mission) |
 
 | | |
 |---|---|
-| Standing in the first playable area (~2,400-3,300 draws) | 57-62 ms a frame (16-17.5 fps) |
-| The same place, more in view (~7,000 draws) | 72-76 ms (13-14 fps) |
+| Standing in the house (~5,950 draws), with `VICTORY_CARD_BUFFERS_MIN_MB=1` | 66-67 ms a frame (15 fps) |
+| The same, without it | 75-77 ms (13 fps) |
+| Playing | about 12 fps |
 | Memory | game process 14-16 GB resident; 32 GB with swap was enough |
 
-Faces move (mouths, brows, blinks), skin and clothes look right, and the logo
-videos play smoothly.
+Faces move (mouths, brows, blinks), skin and clothes look right, plants near the
+player no longer pop (avatarmanz/VIctory-7900XTX#437), and the logo videos play
+smoothly. The CPU, not the card, sets the frame: our submitting thread works the
+whole frame while the card is busy about 41 ms of it.
 
 It started at ~575 ms a frame on this base (2 fps). What brought it down, run by
 run, is in [docs/linux-wine.md](docs/linux-wine.md).
@@ -46,6 +49,11 @@ What is known to be wrong here:
   builder's, which is off (Belobug/VIctory-Belobug-AMD#269).
 - Lighting indoors is only approximate without ray tracing (an ambient stand-in).
 - Loading the world takes more than 40 s.
+- `VICTORY_CARD_BUFFERS_MIN_MB=1` is faster but some textures show in one colour
+  and a few artifacts appear.
+- The renderer patches (`VICTORY_PORT_CONSTANTS/DESCRIPTORS/CBV`), which make other
+  Wine setups much faster (avatarmanz/VIctory-7900XTX#440), are more than twice as
+  slow here and darken floors (run 64); leave them off for now.
 
 ## How to run it on Linux
 
@@ -72,8 +80,14 @@ Then, with a Wine prefix of Proton's:
   without touching Proton or the prefix.
 - A wineserver with the view-tree patch, or loading the world is far slower.
 - The settings of `scripts/play.ps1` (not `-Safe`) as environment variables, plus
-  `VICTORY_FETCH_CHECK=1` (without it the characters' skin looks wrong). Leave
-  `VICTORY_PORT_GUARD` and `VICTORY_PORT_JOURNAL` off (clothes look plastic, skin waxy).
+  `VICTORY_FETCH_CHECK=1` (without it the characters' skin looks wrong) and
+  `VICTORY_CARD_BUFFERS_MIN_MB=1` (faster, some textures wrong). Leave
+  `VICTORY_PORT_GUARD` and `VICTORY_PORT_JOURNAL` off (clothes look plastic, skin waxy),
+  and `VICTORY_SUBMIT_FRAMES` unset (2 brings back waxy faces).
+- Optional: PlayStation button prompts, built from your own copy with `victory glyphs`
+  and served with `VICTORY_FILE_PATCH` ([docs/playstation-prompts.md](docs/playstation-prompts.md)).
+- `scripts/play.sh` (from avatarmanz/VIctory-7900XTX#440) is a launcher for this setup;
+  not used here yet: its `play-1080p.sh` settings are the slow ones above.
 - `wine victory.exe run <your copy's executable> --execute --console series-x`.
 
 All of it, with the reasons and the measurements, is in
@@ -124,6 +138,13 @@ commits taken from elsewhere name the commit and its author.
 - **tippythetaidum (fxceless/victory-fork#927)**: the half views that make faces
   right on Radeon; **bordersky/victory-linux** and **Fedalv** for carrying and
   testing the three face pieces together under Linux.
+- **borntofrag34**: the Linux/Wine branch of avatarmanz/VIctory-7900XTX#440 (Wine fixes for the renderer
+  patches, the pipeline library and compute waits under Wine, `scripts/play.sh`); **LloydNicholson**: the plant
+  fix of avatarmanz/VIctory-7900XTX#437; **icecreammule277-dot**: `VICTORY_WC_NO_BACK`
+  (Belobug/VIctory-Belobug-AMD#477); and the authors of avatarmanz/VIctory-7900XTX#423, #429, #443, #446, #447,
+  #448 and Belobug/VIctory-Belobug-AMD#512, #518, picked here with their authors kept.
+- **Kenney** (Input Prompts) and **Xelu** (Free Controller & Key Prompts), both CC0: the PlayStation
+  prompt symbols and controller picture `victory glyphs` builds; not stored here.
 - **[HansKristian-Work/dxil-spirv](https://github.com/HansKristian-Work/dxil-spirv)**
   and **vkd3d-proton**: the dxil-spirv fix (`694cc674`) the shadow pipelines need.
 - **[fxceless/victory-fork](https://github.com/fxceless/victory-fork)**: the fork the RX 7900 XTX base

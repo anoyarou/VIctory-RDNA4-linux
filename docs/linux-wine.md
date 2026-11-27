@@ -7,6 +7,23 @@ needed ported from our earlier branch `speed-trial` (on Belobug `main`; archived
 `docs/linux-wine.md` has the measurements of 32 runs. On this branch, runs 33-43 (RX 9070 XT, RADV,
 Proton Experimental `experimental-11.0-20261112`, from a save, standing still in the first playable
 area) [measured on one machine].
+Runs 44-65 continued the same way (from 2026-11-27 standing at a snake terrarium in the house, a new save);
+the newest results are in the sections below, and the current state is summed up next.
+
+## Where it stands (2026-11-27, runs 59-65)
+
+- **Picture:** plants near the player no longer pop (avatarmanz/VIctory-7900XTX#437, run 59); faces and skin right with
+  the defaults. `VICTORY_CARD_BUFFERS_MIN_MB=1` costs a one-colour couch texture and some artifacts (run 63).
+- **Speed:** ~67 ms a frame (15 fps) standing at the terrarium (~5,950 draws) with `VICTORY_CARD_BUFFERS_MIN_MB=1`
+  (run 63); ~12 fps while playing [user]. Our submitting thread sets the frame, not the card: card busy ~41 ms
+  (avatarmanz/VIctory-7900XTX#429's critical path, run 62).
+- **Settings to leave alone:** `VICTORY_SUBMIT_FRAMES=2` (no gain, waxy faces, run 60); `VICTORY_PORT_GUARD`/
+  `VICTORY_PORT_JOURNAL` (runs 44, earlier); #440's renderer-patch set `VICTORY_PORT_CONSTANTS/DESCRIPTORS/CBV=1` with its
+  60 fps pacing (161-176 ms and a too-dark floor here, run 64).
+- **Being measured:** `VICTORY_WC_NO_BACK=1` alone (Belobug/VIctory-Belobug-AMD#477; run 65). In run 64 it took copy-back
+  from ~27 to 4-10 ms.
+- **Wineserver:** runs 52-57 used stock Proton's by mistake (164 ms where the view-tree one gives 81 ms, run 58); our
+  launcher defaults to the patched one since.
 
 ## Setup (verified on this branch unless marked)
 
@@ -174,7 +191,14 @@ Present/copy-back ~29 ms and refresh flushes ~22 ms. Run 63's `VICTORY_CARD_BUFF
   checks that the title does not read them; `VICTORY_WC_STATS=1`. Reported: copy-back 34.8 -> 17.2 ms (7900 XTX), and
   33 -> 28 ms a frame on top of #440 under Wine.
 
-Untested here so far. Not run: this build (`d81130d`).
+**Run 64** (`d81130d`, our settings + `CARD_BUFFERS_MIN_MB=1` + #440's `play-1080p.sh` set: `VICTORY_PORT_CONSTANTS=1`,
+`PORT_DESCRIPTORS=1`, `PORT_CBV=1`, `FRAME_INTERVAL_MS=16.667`, `FRAME_INTERVAL_DRAWS=500`, `JOIN_PARTS_DRAWS=500`, plus
+`WC_NO_BACK=1`) [measured on one machine]: shaders translated again (logo video 20-27 fps for ~30 s, then 30). At the
+terrarium, every pipeline made, ~4,140 draws: **161-176 ms a frame**, against 67 ms in run 63. Card busy 107-112 ms
+(41), Present 94.6 ms (19.6), refresh flushes 102 ms (22.5), **copy-back 4-10 ms (27)**. The house floor much too dark
+[user]. `PORT_HOME` was active and nothing failed. On this card with these settings the renderer patches cost far more
+than they gain, the opposite of #440's RX 7900 GRE; not yet known which of the patches, the pacing or the merged ambient
+code darkens the floor. Run 65 tries `WC_NO_BACK=1` alone.
 
 ## Ported from `speed-trial`
 
