@@ -232,8 +232,31 @@ pub(crate) fn land(back: &Back) {
         // SAFETY: the subresource's part of the mapped buffer.
         let linear = unsafe { std::slice::from_raw_parts(data.cast::<u8>().add(footprint.Offset as usize), len) };
         if let Err(e) = back.layout.tile(&mut tiled, mip, slice, linear, pitch, pitch * rows as usize) {
-            static ONCE: std::sync::Once = std::sync::Once::new();
-            ONCE.call_once(|| tracing::warn!(?e, mip, slice, "a texture copied back could not be tiled"));
+            // Counted and named, not once a process: the title keeps its old
+            // bytes of every such texture, and which ones is what a texture
+            // missing in the picture is traced by (a car's panels, runs 70-75).
+            static UNTILED: AtomicU64 = AtomicU64::new(0);
+            let n = UNTILED.fetch_add(1, Ordering::Relaxed) + 1;
+            if n <= 32 || n.is_power_of_two() {
+                let d = &back.layout.desc;
+                tracing::warn!(
+                    ?e,
+                    mip,
+                    slice,
+                    untiled = n,
+                    width = d.width,
+                    height = d.height,
+                    depth = d.depth,
+                    mips = d.mips,
+                    element_bytes = d.element_bytes,
+                    block = d.block,
+                    swizzle = d.swizzle.0,
+                    dimension = ?d.dimension,
+                    address = format_args!("{at:#x}"),
+                    bytes = size,
+                    "a texture copied back could not be tiled: the title keeps its old bytes of it"
+                );
+            }
             // SAFETY: mapped above.
             unsafe { back.buffer.Unmap(0, None) };
             return;
