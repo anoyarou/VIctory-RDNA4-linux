@@ -138,9 +138,13 @@ The `--diverge` family runs the recorded copies without the merge.
 ## Limits
 
 - Not recorded, but reported when used: reserved (tiled) resources, bundles,
-  ray tracing, render passes, enhanced barriers, predication, stream output,
+  ray tracing, render passes, enhanced barriers other than global ones, predication, stream output,
   `ClearUnorderedAccessView`, shading rate, newer creation methods
   (`CreateCommittedResource1` and on).
+- Enhanced barriers (`ID3D12GraphicsCommandList7::Barrier`, the waits of
+  `VICTORY_CLAMP_SYNC` and of the placed-texture copies) are played as one
+  global unordered-access barrier each: a wait at least as strong. Captures
+  made before this was recorded leave them out, and their replays can race.
 - Not kept: contents of multisampled textures, of textures in memory the CPU
   sees, and of texture levels over 256 MB; resources of other queues' work.
 - Texture states come from the barriers seen. A resource that overlaps the
