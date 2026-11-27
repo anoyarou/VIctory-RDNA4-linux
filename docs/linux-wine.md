@@ -14,14 +14,14 @@ the newest results are in the sections below, and the current state is summed up
 
 - **Picture:** plants near the player no longer pop (avatarmanz/VIctory-7900XTX#437, run 59); faces and skin right with
   the defaults. `VICTORY_CARD_BUFFERS_MIN_MB=1` costs a one-colour couch texture and some artifacts (run 63).
-- **Speed:** ~67 ms a frame (15 fps) standing at the terrarium (~5,950 draws) with `VICTORY_CARD_BUFFERS_MIN_MB=1`
-  (run 63); ~12 fps while playing [user]. Our submitting thread sets the frame, not the card: card busy ~41 ms
+- **Speed:** **59-61 ms a frame (16.5-17 fps)** standing at the terrarium (~5,950 draws) with
+  `VICTORY_CARD_BUFFERS_MIN_MB=1` and `VICTORY_WC_NO_BACK=1` (run 65; 67 ms with the first alone, run 63); ~12 fps
+  while playing [user, before run 65]. Our submitting thread sets the frame, not the card: card busy ~41 ms
   (avatarmanz/VIctory-7900XTX#429's critical path, run 62).
 - **Settings to leave alone:** `VICTORY_SUBMIT_FRAMES=2` (no gain, waxy faces, run 60); `VICTORY_PORT_GUARD`/
   `VICTORY_PORT_JOURNAL` (runs 44, earlier); #440's renderer-patch set `VICTORY_PORT_CONSTANTS/DESCRIPTORS/CBV=1` with its
   60 fps pacing (161-176 ms and a too-dark floor here, run 64).
-- **Being measured:** `VICTORY_WC_NO_BACK=1` alone (Belobug/VIctory-Belobug-AMD#477; run 65). In run 64 it took copy-back
-  from ~27 to 4-10 ms.
+- **`VICTORY_WC_NO_BACK=1`** (Belobug/VIctory-Belobug-AMD#477) alone: copy-back 27 -> 13 ms, picture right (run 65).
 - **Wineserver:** runs 52-57 used stock Proton's by mistake (164 ms where the view-tree one gives 81 ms, run 58); our
   launcher defaults to the patched one since.
 
@@ -198,7 +198,11 @@ terrarium, every pipeline made, ~4,140 draws: **161-176 ms a frame**, against 67
 (41), Present 94.6 ms (19.6), refresh flushes 102 ms (22.5), **copy-back 4-10 ms (27)**. The house floor much too dark
 [user]. `PORT_HOME` was active and nothing failed. On this card with these settings the renderer patches cost far more
 than they gain, the opposite of #440's RX 7900 GRE; not yet known which of the patches, the pacing or the merged ambient
-code darkens the floor. Run 65 tries `WC_NO_BACK=1` alone.
+code darkens the floor.
+
+**Run 65** (`d81130d`, our settings + `CARD_BUFFERS_MIN_MB=1` + `WC_NO_BACK=1` only): the floor right again, so the
+patches or the pacing darkened it. Terrarium, ~5,950 draws: **59-61 ms** (run 63: 67), copy-back 13 ms (27), Present
+16.8 ms, refresh flushes 21.2 ms, card busy 34-36 ms; no errors [measured on one machine].
 
 ## Ported from `speed-trial`
 

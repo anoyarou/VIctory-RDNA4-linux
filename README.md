@@ -30,8 +30,8 @@ Tested on one machine only:
 
 | | |
 |---|---|
-| Standing in the house (~5,950 draws), with `VICTORY_CARD_BUFFERS_MIN_MB=1` | 66-67 ms a frame (15 fps) |
-| The same, without it | 75-77 ms (13 fps) |
+| Standing in the house (~5,950 draws), with `VICTORY_CARD_BUFFERS_MIN_MB=1` and `VICTORY_WC_NO_BACK=1` | 59-61 ms a frame (16.5-17 fps) |
+| The same, with neither | 75-77 ms (13 fps) |
 | Playing | about 12 fps |
 | Memory | game process 14-16 GB resident; 32 GB with swap was enough |
 
@@ -81,7 +81,8 @@ Then, with a Wine prefix of Proton's:
 - A wineserver with the view-tree patch, or loading the world is far slower.
 - The settings of `scripts/play.ps1` (not `-Safe`) as environment variables, plus
   `VICTORY_FETCH_CHECK=1` (without it the characters' skin looks wrong) and
-  `VICTORY_CARD_BUFFERS_MIN_MB=1` (faster, some textures wrong). Leave
+  `VICTORY_CARD_BUFFERS_MIN_MB=1` (faster, some textures wrong) and `VICTORY_WC_NO_BACK=1`
+  (copy-back halved, Belobug/VIctory-Belobug-AMD#477). Leave
   `VICTORY_PORT_GUARD` and `VICTORY_PORT_JOURNAL` off (clothes look plastic, skin waxy),
   and `VICTORY_SUBMIT_FRAMES` unset (2 brings back waxy faces).
 - Optional: PlayStation button prompts, built from your own copy with `victory glyphs`
