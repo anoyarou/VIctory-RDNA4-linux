@@ -27,6 +27,10 @@ the newest results are in the sections below, and the current state is summed up
 
 ## Setup (verified on this branch unless marked)
 
+The scripts in `scripts/linux/` (2026-11-27) set up everything below except the DLLs: `run.sh` with
+`settings.sh`, `run-logged.sh` for measured runs, `build-xwin.sh`. They are the scripts runs 1-66 were made
+with, without this machine's paths; the window modes are verified (run 66), the rest as the runs below.
+
 - **Native Direct3D 12 and Microsoft's compiler:**
   `WINEDLLOVERRIDES="d3d12,d3d12core,dxgi,d3d11,d3d10core=n,b;d3dcompiler_47=n"`, a 64-bit
   Microsoft `d3dcompiler_47.dll` next to `victory.exe` (Belobug/VIctory-Belobug-AMD#183; #233 and

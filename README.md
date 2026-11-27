@@ -67,7 +67,11 @@ cp victory.example.toml victory.toml      # then set your paths, outside this fo
 cargo xwin build --profile diag --target x86_64-pc-windows-msvc -p victory --features victory/diagnostics
 ```
 
-Then, with a Wine prefix of Proton's:
+The scripts in [scripts/linux/](scripts/linux/README.md) do all of the below: `build-xwin.sh`
+builds, `run.sh` / `run-logged.sh` start it in gamescope (windowed, borderless or fullscreen) with the
+settings measured here (`settings.sh`).
+
+By hand, with a Wine prefix of Proton's:
 
 - `WINEDLLOVERRIDES="d3d12,d3d12core,dxgi,d3d11,d3d10core=n,b;d3dcompiler_47=n"`, and a
   64-bit Microsoft `d3dcompiler_47.dll` next to `victory.exe`.
@@ -87,8 +91,8 @@ Then, with a Wine prefix of Proton's:
   and `VICTORY_SUBMIT_FRAMES` unset (2 brings back waxy faces).
 - Optional: PlayStation button prompts, built from your own copy with `victory glyphs`
   and served with `VICTORY_FILE_PATCH` ([docs/playstation-prompts.md](docs/playstation-prompts.md)).
-- `scripts/play.sh` (from avatarmanz/VIctory-7900XTX#440) is a launcher for this setup;
-  not used here yet: its `play-1080p.sh` settings are the slow ones above.
+- `scripts/play.sh` (from avatarmanz/VIctory-7900XTX#440) is another launcher, with its own prefix and DXVK's
+  dxgi; not used here: its `play-1080p.sh` settings are the slow ones above.
 - `wine victory.exe run <your copy's executable> --execute --console series-x`.
 
 All of it, with the reasons and the measurements, is in
