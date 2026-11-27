@@ -215,6 +215,8 @@ here; built only.
 
 - **Belobug/VIctory-Belobug-AMD#636** (MamaLeVrai): a slot flipped ahead under relay 2 waits for the submissions begun
   when it was queued (part of Belobug/VIctory-Belobug-AMD#545). Candidate for the waxy faces with `VICTORY_SUBMIT_FRAMES=2`.
+  **Reverted (`2686164`) after run 67:** 1.4-1.6 s a frame (run 65: ~60 ms), the submitting thread's texture refresh
+  updates 1,066 ms a frame (27). Suspected, to be confirmed by run 68 without it.
 - **avatarmanz/VIctory-7900XTX#438** (HAL9000RELOADED): `VICTORY_PORT_CONSTANTS_ORDER_BATCH=1` (off) clamps a run of
   port 1's in-place indirect executions in one pass. Reported 68 -> 40 ms on an RX 7900 XTX (Windows); slower on an RTX 5090
   under Proton. For run 64's slow renderer patches.
