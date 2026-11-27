@@ -155,6 +155,27 @@ Then avatarmanz/VIctory-7900XTX#429 (`f92ad0e`, 3 commits, clean; instrumentatio
 `VICTORY_CRITICAL_PATH=1` gives one line a frame with the three chains and the refresh flushes; the fps line ends with
 the card's busy ms/frame by our fence clock. Built, not run yet.
 
+## Merged 2026-11-27: avatarmanz/VIctory-7900XTX#440 and Belobug/VIctory-Belobug-AMD#477 (`d81130d`)
+
+Run 62 (#429's critical path) showed our submitting thread sets the frame (75 ms; the card busy 41-42 ms):
+Present/copy-back ~29 ms and refresh flushes ~22 ms. Run 63's `VICTORY_CARD_BUFFERS_MIN_MB=1` took it to 66.7 ms
+(compares ~130 -> ~29 MB a frame) at the cost of a one-colour couch texture and some artifacts [user].
+
+- **avatarmanz/VIctory-7900XTX#440** (borntofrag34, merge `53327b0`; it carries avatarmanz `main` `014d52de`): Wine
+  fixes that make renderer patches 1, 2 and 5 work under RADV (`VICTORY_PORT_HOME`: patch 1's heap as one anonymous
+  mapping, no black picture; `VICTORY_CLAMP_SYNC`: clamp waits as enhanced barriers), `VICTORY_WINE_MAP` (overlaps our
+  view-tree wineserver), `SINGLE_LATCH`/`PIPELINE_WATCH` (dxil-spirv stack), `LIBRARY_NULL` (the pipeline library is
+  kept under Wine), `COMPUTE_WAIT_MS` (faces on cold caches), `FRAME_INTERVAL_DRAWS`, `JOIN_PARTS_DRAWS`, `scripts/play.sh`
+  and `play-1080p.sh`. Reported there: 2.3 -> 36 fps on an RX 7900 GRE, first scene, 1080p. Its own findings are kept in
+  `docs/linux-wine-pr440.md`. Merge notes: our #314 reflection hold with `AMBIENT_RT`'s band; #437's count beside port 1's
+  line; #440's compute wait uses #448's per-pipeline waiters (the shared `DONE` is gone on our branch).
+- **Belobug/VIctory-Belobug-AMD#477** (icecreammule277-dot, 7 commits on our base `4eb6cfd`): `VICTORY_WC_NO_BACK=1` keeps
+  shaders' writes into write-combined title memory on the card (no snapshot, compare or copy-back); `VICTORY_WC_CENSUS=1`
+  checks that the title does not read them; `VICTORY_WC_STATS=1`. Reported: copy-back 34.8 -> 17.2 ms (7900 XTX), and
+  33 -> 28 ms a frame on top of #440 under Wine.
+
+Untested here so far. Not run: this build (`d81130d`).
+
 ## Ported from `speed-trial`
 
 | Commit there | Here | What |
