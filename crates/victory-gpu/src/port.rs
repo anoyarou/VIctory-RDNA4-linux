@@ -121,7 +121,13 @@ pub(crate) fn place_for(start: u64, len: u64, window: bool) -> Option<Placed> {
         return None;
     }
     let host = crate::host::host()?;
-    if let Err(why) = section_view_coherent(&host.device) {
+    // Under Wine the home path (`VICTORY_PORT_HOME`) opens no view of a
+    // section: the probe below tests that path, which fails there by design,
+    // so it would turn the home path off too. The home path asks the card
+    // itself (`open_at_home`, `crate::inplace::heap_shows`) and gives a
+    // stretch up when the card reads zeros.
+    let home = crate::pipeline::on_wine() && crate::inplace::at_home(start as usize, len as usize);
+    if let Err(why) = if home { &Ok(()) } else { section_view_coherent(&host.device) } {
         let n = STATS[5].fetch_add(1, Ordering::Relaxed) + 1;
         if n == 1 {
             tracing::warn!(
