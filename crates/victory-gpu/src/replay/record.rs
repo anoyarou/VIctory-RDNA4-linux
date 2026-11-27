@@ -1322,8 +1322,7 @@ unsafe extern "system" fn create_list(
             }
             {
                 let mut inner = lock(&state.inner);
-                inner.whole =
-                    r.armed.load(Ordering::SeqCst) && kind == D3D12_COMMAND_LIST_TYPE_DIRECT;
+                inner.whole = r.armed.load(Ordering::SeqCst) && recorded_kind(r, kind.0);
                 begin(&mut inner, r, pso);
             }
             for q in all {
@@ -1992,6 +1991,14 @@ unsafe extern "system" fn list_close(this: Ptr) -> HRESULT {
     }
 }
 
+/// Whether lists of this type are recorded: direct ones, and with
+/// `Settings::queues` compute and copy ones (not bundles).
+fn recorded_kind(r: &Recorder, kind: i32) -> bool {
+    kind == D3D12_COMMAND_LIST_TYPE_DIRECT.0
+        || (r.settings.queues
+            && (kind == D3D12_COMMAND_LIST_TYPE_COMPUTE.0 || kind == D3D12_COMMAND_LIST_TYPE_COPY.0))
+}
+
 unsafe extern "system" fn list_reset(this: Ptr, allocator: Ptr, pso: Ptr) -> HRESULT {
     // SAFETY: as above.
     unsafe {
@@ -2004,8 +2011,7 @@ unsafe extern "system" fn list_reset(this: Ptr, allocator: Ptr, pso: Ptr) -> HRE
         {
             let mut inner = lock(&state.inner);
             inner.closed = None;
-            inner.whole =
-                r.armed.load(Ordering::SeqCst) && state.kind == D3D12_COMMAND_LIST_TYPE_DIRECT.0;
+            inner.whole = r.armed.load(Ordering::SeqCst) && recorded_kind(r, state.kind);
             begin(&mut inner, r, pso);
         }
         hr
