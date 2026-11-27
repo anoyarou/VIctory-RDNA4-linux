@@ -208,6 +208,30 @@ code darkens the floor.
 patches or the pacing darkened it. Terrarium, ~5,950 draws: **59-61 ms** (run 63: 67), copy-back 13 ms (27), Present
 16.8 ms, refresh flushes 21.2 ms, card busy 34-36 ms; no errors [measured on one machine].
 
+## Merged 2026-11-27, third round (`45497e9`; not yet run)
+
+Seven open PRs that merged with no conflicts, one merge commit each (`6fe8b1f`..`45497e9`). All untested in the game
+here; built only.
+
+- **Belobug/VIctory-Belobug-AMD#636** (MamaLeVrai): a slot flipped ahead under relay 2 waits for the submissions begun
+  when it was queued (part of Belobug/VIctory-Belobug-AMD#545). Candidate for the waxy faces with `VICTORY_SUBMIT_FRAMES=2`.
+- **avatarmanz/VIctory-7900XTX#438** (HAL9000RELOADED): `VICTORY_PORT_CONSTANTS_ORDER_BATCH=1` (off) clamps a run of
+  port 1's in-place indirect executions in one pass. Reported 68 -> 40 ms on an RX 7900 XTX (Windows); slower on an RTX 5090
+  under Proton. For run 64's slow renderer patches.
+- **Belobug/VIctory-Belobug-AMD#569** (BlueCatsz, for #500): a one-time coherency probe before in-place memory is used;
+  under Wine vkd3d-proton can open a file-backed heap that is zero-filled and not connected. Possible cause of run 64's
+  dark floor.
+- **avatarmanz/VIctory-7900XTX#457** (delacor): thin replays reuse finished host lists (`VICTORY_LIST_CREATE_POOL=0`: old path).
+- **Belobug/VIctory-Belobug-AMD#478** (cmt8): the write guard makes only view memory read-only (under Wine a thread's
+  stack in a guarded range was made read-only and the kernel ended the process); one `VirtualQuery` a region.
+- **avatarmanz/VIctory-7900XTX#450** (UwUCammie): `VICTORY_EARLY_SCREEN_MAX_BYTES` (off unless set) compiles small screen
+  pipelines at creation.
+- **Belobug/VIctory-Belobug-AMD#625** (11run11): texture store kept levels bounded by host memory; only with
+  `VICTORY_TEXTURE_STORE`.
+
+Left out: avatarmanz/VIctory-7900XTX#436 (`FILL_FORWARD`; an ownership bug reported in review), Marvisak/VIctory#3535 and
+#3516 (conflict throughout), Belobug/VIctory-Belobug-AMD#622 (conflicts in `pipeline/make.rs`).
+
 ## Ported from `speed-trial`
 
 | Commit there | Here | What |
