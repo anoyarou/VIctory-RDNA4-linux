@@ -130,6 +130,11 @@ pub(crate) fn place_part(device: &ID3D12Device, start: u64, len: u64) -> Result<
     Ok(Placed { buffer, heap, gpu, bias: start - at })
 }
 
+fn private_part_coherent(device: &ID3D12Device) -> &'static Result<(), String> {
+    static COHERENT: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+    COHERENT.get_or_init(|| verify_private_part_coherent(device))
+}
+
 /// Title memory `[start, start + len)` in place, for a window outside
 /// buffers or a title buffer, if [`level`] asks for it and the memory can
 /// be opened; `None` leaves the caller to make a copy, as before.
@@ -147,6 +152,15 @@ pub(crate) fn place_for(start: u64, len: u64, window: bool) -> Option<Placed> {
         return None;
     }
     let host = crate::host::host()?;
+    if let Err(why) = private_part_coherent(&host.device) {
+        if STATS[5].fetch_add(1, Ordering::Relaxed) == 0 {
+            tracing::warn!(
+                why = why.as_str(),
+                "title memory in place: opened private heap is not coherent with CPU memory, falling back to host copies"
+            );
+        }
+        return None;
+    }
     match place_part(&host.device, start, len) {
         Ok(placed) => {
             let at = if window { 0 } else { 2 };
@@ -1003,6 +1017,146 @@ fn same(at: *const u8, bytes: &[u8]) -> bool {
     unsafe { std::slice::from_raw_parts(at, bytes.len()) == bytes }
 }
 
+/// Verifies that GPU reads and writes through `buffer` are coherent with CPU
+/// writes and reads at `cpu` (catching drivers that silently return a
+/// disconnected buffer when host-memory import fails).
+///
+/// # Safety
+///
+/// `cpu` must point to at least 256 bytes of committed, writable memory that
+/// remains mapped for the duration of the call.
+unsafe fn verify_buffer_coherent(rig: &mut Rig, buffer: &ID3D12Resource, cpu: *mut u8) -> Result<(), String> {
+    const CHECK: usize = 256;
+    fill(cpu, CHECK, 0x13);
+    let first = rig.fetch(buffer, 0, CHECK).map_err(|e| format!("coherency readback 1 failed: {e}"))?;
+    if !same(cpu, &first) {
+        return Err("GPU read of in-place buffer did not match initial CPU bytes".to_owned());
+    }
+    fill(cpu, CHECK, 0x57);
+    let second = rig.fetch(buffer, 0, CHECK).map_err(|e| format!("coherency readback 2 failed: {e}"))?;
+    if !same(cpu, &second) {
+        return Err("GPU read of in-place buffer did not reflect subsequent CPU writes".to_owned());
+    }
+    let reply: Vec<u8> = (0..CHECK).map(|i| (i as u8).wrapping_mul(17).wrapping_add(0xa5)).collect();
+    rig.store(buffer, 0, &reply).map_err(|e| format!("coherency writeback failed: {e}"))?;
+    if !same(cpu, &reply) {
+        return Err("CPU read of in-place memory did not reflect GPU write".to_owned());
+    }
+    Ok(())
+}
+
+/// Opens `K64` bytes at `heap_at` with `OpenExistingHeapFromAddress1`,
+/// places a buffer over it, and verifies GPU↔CPU coherency against `cpu`.
+/// Drops the buffer, heap, and probe queue before returning so the caller can
+/// immediately unmap or release the backing memory.
+///
+/// # Safety
+///
+/// `heap_at` must refer to `K64` bytes of committed memory that stays mapped
+/// until this function returns, and `cpu` must point to at least 256 bytes of
+/// committed, writable memory backing the same pages.
+unsafe fn verify_part_coherent(
+    device: &ID3D12Device,
+    label: &str,
+    heap_at: usize,
+    cpu: *mut u8,
+) -> Result<(), String> {
+    device
+        .cast::<ID3D12Device13>()
+        .map_err(|e| format!("ID3D12Device13 unavailable: {e}"))?;
+    let mut rig = Rig::new(device).map_err(|e| format!("coherency probe queue failed: {e}"))?;
+    let heap = open(device, From::Part(heap_at, K64))
+        .map_err(|e| format!("open {label} heap failed: {e}"))?;
+    let buffer = place(device, &heap, 0, K64 as u64)
+        .map_err(|e| format!("place buffer in {label} heap failed: {e}"))?;
+    // SAFETY: caller guarantees `cpu` points to committed, writable memory live across the call.
+    let result = unsafe { verify_buffer_coherent(&mut rig, &buffer, cpu) };
+    drop(buffer);
+    drop(heap);
+    drop(rig);
+    result
+}
+
+/// Verifies once that `OpenExistingHeapFromAddress1` on private write-watched
+/// memory produces a heap coherent with the CPU allocation.
+pub(crate) fn verify_private_part_coherent(device: &ID3D12Device) -> Result<(), String> {
+    // SAFETY: temporary allocation of `K64` bytes released only after `verify_part_coherent` drops GPU objects.
+    let base = unsafe {
+        mem::VirtualAlloc(
+            std::ptr::null(),
+            K64,
+            mem::MEM_RESERVE | mem::MEM_COMMIT | MEM_WRITE_WATCH,
+            mem::PAGE_READWRITE,
+        )
+    }
+    .cast::<u8>();
+    if base.is_null() {
+        return Err(format!("VirtualAlloc failed: {}", std::io::Error::last_os_error()));
+    }
+    // SAFETY: `base` points to `K64` bytes of committed writable memory live until `VirtualFree`.
+    let result = unsafe { verify_part_coherent(device, "private", base as usize, base) };
+    // SAFETY: `verify_part_coherent` dropped its buffer, heap, and queue before returning.
+    unsafe { mem::VirtualFree(base.cast(), 0, mem::MEM_RELEASE) };
+    result
+}
+
+/// Verifies once that `OpenExistingHeapFromAddress1` on a second view of a
+/// section (`port.rs`) produces a heap coherent with the section's memory.
+pub(crate) fn verify_section_view_coherent(device: &ID3D12Device) -> Result<(), String> {
+    // SAFETY: temporary `K64` section created here and closed after GPU objects drop.
+    let section = unsafe {
+        mem::CreateFileMappingW(
+            windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE,
+            std::ptr::null(),
+            mem::PAGE_READWRITE | mem::SEC_RESERVE,
+            0,
+            K64 as u32,
+            std::ptr::null(),
+        )
+    };
+    if section.is_null() {
+        return Err(format!("CreateFileMappingW failed: {}", std::io::Error::last_os_error()));
+    }
+    // SAFETY: `section` is a valid mapping handle of `K64` bytes.
+    let title_view = unsafe { mem::MapViewOfFile(section, mem::FILE_MAP_WRITE, 0, 0, K64) };
+    if title_view.Value.is_null() {
+        let err = std::io::Error::last_os_error();
+        // SAFETY: `section` is valid and no views remain mapped.
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(section) };
+        return Err(format!("MapViewOfFile (title view) failed: {err}"));
+    }
+    // SAFETY: `title_view.Value` covers `K64` bytes of the reserved section.
+    if unsafe { mem::VirtualAlloc(title_view.Value, K64, mem::MEM_COMMIT, mem::PAGE_READWRITE) }.is_null() {
+        let err = std::io::Error::last_os_error();
+        // SAFETY: `title_view` and `section` are valid handles created above.
+        unsafe {
+            mem::UnmapViewOfFile(title_view);
+            windows_sys::Win32::Foundation::CloseHandle(section);
+        }
+        return Err(format!("VirtualAlloc commit failed: {err}"));
+    }
+    // SAFETY: `section` is a valid mapping handle of `K64` bytes.
+    let our_view = unsafe { mem::MapViewOfFile(section, mem::FILE_MAP_WRITE, 0, 0, K64) };
+    if our_view.Value.is_null() {
+        let err = std::io::Error::last_os_error();
+        // SAFETY: `title_view` and `section` are valid handles created above.
+        unsafe {
+            mem::UnmapViewOfFile(title_view);
+            windows_sys::Win32::Foundation::CloseHandle(section);
+        }
+        return Err(format!("MapViewOfFile (host view) failed: {err}"));
+    }
+    // SAFETY: both views cover `K64` committed writable bytes of `section` until unmapped below.
+    let result = unsafe { verify_part_coherent(device, "section view", our_view.Value as usize, title_view.Value.cast::<u8>()) };
+    // SAFETY: `verify_part_coherent` dropped its buffer, heap, and queue before returning.
+    unsafe {
+        mem::UnmapViewOfFile(our_view);
+        mem::UnmapViewOfFile(title_view);
+        windows_sys::Win32::Foundation::CloseHandle(section);
+    }
+    result
+}
+
 /// The process's working set in MB.
 fn working_set_mb() -> u64 {
     use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
@@ -1687,6 +1841,43 @@ pub(crate) mod tests {
             assert!(matches!(place_part(&device, start, len), Err(None)));
             mem::VirtualFree(base.cast(), 0, mem::MEM_RELEASE);
         }
+    }
+
+    #[test]
+    fn warp_verify_buffer_coherent_rejects_disconnected_buffer() {
+        let _turn = crate::indirect::tests::warp_turn();
+        let Some(device) = warp() else { return };
+        // SAFETY: temporary `K64` private allocation released after GPU objects drop.
+        unsafe {
+            let base = mem::VirtualAlloc(std::ptr::null(), K64, mem::MEM_RESERVE | mem::MEM_COMMIT, mem::PAGE_READWRITE).cast::<u8>();
+            assert!(!base.is_null());
+            let mut rig = Rig::new(&device).unwrap();
+            let disconnected = rig.committed(D3D12_HEAP_TYPE_DEFAULT, K64 as u64, D3D12_RESOURCE_STATE_COMMON).unwrap();
+            assert!(verify_buffer_coherent(&mut rig, &disconnected, base).is_err());
+            drop(disconnected);
+            drop(rig);
+            mem::VirtualFree(base.cast(), 0, mem::MEM_RELEASE);
+        }
+    }
+
+    #[test]
+    fn warp_verify_private_part_coherent_succeeds() {
+        let _turn = crate::indirect::tests::warp_turn();
+        let Some(device) = warp() else { return };
+        if device.cast::<ID3D12Device13>().is_err() {
+            return;
+        }
+        verify_private_part_coherent(&device).unwrap_or_else(|e| panic!("private part coherency failed: {e}"));
+    }
+
+    #[test]
+    fn warp_verify_section_view_coherent_succeeds() {
+        let _turn = crate::indirect::tests::warp_turn();
+        let Some(device) = warp() else { return };
+        if device.cast::<ID3D12Device13>().is_err() {
+            return;
+        }
+        verify_section_view_coherent(&device).unwrap_or_else(|e| panic!("section view coherency failed: {e}"));
     }
 
     /// The census names each kind of memory.

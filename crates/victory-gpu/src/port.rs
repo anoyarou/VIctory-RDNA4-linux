@@ -108,6 +108,11 @@ pub(crate) fn wanted(at: u64, len: u64) -> bool {
     on() && at.checked_add(len).is_some_and(|end| end <= LOW && len > 0)
 }
 
+fn section_view_coherent(device: &ID3D12Device) -> &'static Result<(), String> {
+    static COHERENT: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+    COHERENT.get_or_init(|| crate::inplace::verify_section_view_coherent(device))
+}
+
 /// Title memory `[start, start + len)` in place, if [`wanted`] and the
 /// memory is one stretch of a section: a buffer placed in the region's
 /// heap. `None` leaves the caller to do what it did before.
@@ -116,6 +121,16 @@ pub(crate) fn place_for(start: u64, len: u64, window: bool) -> Option<Placed> {
         return None;
     }
     let host = crate::host::host()?;
+    if let Err(why) = section_view_coherent(&host.device) {
+        let n = STATS[5].fetch_add(1, Ordering::Relaxed) + 1;
+        if n == 1 {
+            tracing::warn!(
+                why = why.as_str(),
+                "renderer port 1: opened section view heap is not coherent with CPU memory, falling back to host copies"
+            );
+        }
+        return None;
+    }
     match place_in(&host.device, start, len) {
         Ok(placed) => {
             crate::inplace::counted(window, len);
