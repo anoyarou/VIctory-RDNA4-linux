@@ -2991,30 +2991,6 @@ pub(crate) extern "system" fn create_committed(
 }
 
 /// Device method 0x3f8, inferred from the title's calls
-/// A committed 2D texture of one level the way the title makes one, for
-/// tests elsewhere: the title object, or `None` without a host GPU.
-#[cfg(test)]
-pub(crate) fn title_texture_for_test(width: u64, height: u32, format: u32) -> Option<This> {
-    let heap = HeapProperties { kind: 1, cpu_pages: 0, pool: 0, creation_nodes: 0, visible_nodes: 0 };
-    let desc = ResourceDesc {
-        dimension: 3,
-        alignment: 0,
-        width,
-        height,
-        depth_or_array_size: 1,
-        mip_levels: 1,
-        format,
-        sample_count: 1,
-        sample_quality: 0,
-        layout: 0,
-        flags: 0,
-    };
-    let null = std::ptr::null();
-    let mut out = null;
-    let made = create_committed(null, &heap, 0, &desc, 0, null.cast(), &RESOURCE_IIDS[0], &mut out);
-    (made == S_OK && !out.is_null()).then_some(out)
-}
-
 /// (title+0x193e1b4: its back buffers, heap flag "allow display"): the
 /// committed resource creation of the enhanced-barrier interfaces,
 /// `(heap, heap flags, desc1, initial layout, clear value, protected
