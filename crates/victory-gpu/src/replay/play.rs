@@ -1248,6 +1248,18 @@ impl Player {
                     }
                 }
                 let mut all = Vec::new();
+                // Shader-visible copies of the heap, at most this many
+                // bytes of them (`VICTORY_REPLAY_HEAP_MB`, default 3072):
+                // capture-7 (run 88) asked for 31 of a heap of 4,194,304
+                // views, 4 GB, and the device was lost at the first
+                // submission although every one was made (26 replayed).
+                let budget = std::env::var("VICTORY_REPLAY_HEAP_MB")
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(3072)
+                    << 20;
+                let most = (budget / (u64::from(h.count) * step as u64).max(1)).max(1) as usize;
+                let mut copies = 0usize;
                 for changes in &versions {
                     let mine: Vec<&(u32, u32, Slot)> =
                         changes.iter().filter(|(id, _, _)| *id == h.id).collect();
@@ -1266,7 +1278,13 @@ impl Player {
                         all.push(same);
                         continue;
                     }
-                    let heap = match make(D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) {
+                    let made = if copies < most {
+                        make(D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE)
+                    } else {
+                        Err(windows::core::Error::empty())
+                    };
+                    copies += 1;
+                    let heap = match made {
                         Ok(heap) => heap,
                         // Room for no more of them: the changes go into the
                         // last one, and lists before see them too.
@@ -1312,7 +1330,7 @@ impl Player {
         }
         if full > 0 {
             self.note(format!(
-                "{full} versions of descriptor heaps had no room: earlier lists see later views"
+                "{full} versions of descriptor heaps had no room (VICTORY_REPLAY_HEAP_MB): earlier lists see later views"
             ));
         }
         // Render target and depth views.

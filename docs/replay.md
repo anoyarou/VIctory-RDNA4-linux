@@ -160,6 +160,10 @@ The `--diverge` family runs the recorded copies without the merge.
   and root arguments are.
 - Views replaced during the frame get a heap of their own per submission in
   the replay (64 MB for two million views).
+- Those heaps take at most 3 GB together (`VICTORY_REPLAY_HEAP_MB`); later
+  versions go into the last one, and earlier lists see their views. A
+  capture that asked for 4 GB (31 copies of a 4M-view heap) lost the device
+  at the first submission on RADV, though every heap was made.
 - Upload heaps become custom write-combined ones in the replay, as the card
   writes what the CPU wrote.
 - What the CPU changes in memory both see is taken before each submission, by
