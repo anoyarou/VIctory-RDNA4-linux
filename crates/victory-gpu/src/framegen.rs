@@ -554,6 +554,15 @@ struct UiLayer {
 
 static UI_LAYER: Mutex<Option<UiLayer>> = Mutex::new(None);
 
+/// `VICTORY_FG_HUDLESS=0`: no HUD-less colour is given to the generator
+/// (the UI layer goes to the proxy anyway). A test for the screen's edges
+/// flickering every generated frame: the generator takes what differs
+/// between the frame and the HUD-less colour as UI.
+fn hudless_on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_FG_HUDLESS").is_none_or(|v| v != "0"))
+}
+
 fn ui_layer_on() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VICTORY_FG_UI_LAYER").is_none_or(|v| v != "0"))
@@ -899,6 +908,7 @@ impl Presentation {
             enabled: armed,
             allow_async: false,
             hudless: match (&self.before_ui, &self.hudless) {
+                _ if !hudless_on() => Resource { resource: null_mut(), description: [0; 8], state: 0 },
                 (Some(texture), _) if armed => Resource {
                     resource: texture.as_raw(),
                     description: [TEXTURE_2D, RGBA8_UNORM, display[0], display[1], 1, 1, 0, 0],
