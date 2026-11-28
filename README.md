@@ -32,6 +32,7 @@ Tested on one machine:
 |---|---|
 | Standing in the house (~7,100 draws) | 52-54 ms (19 fps) |
 | Walking in the house, camera turning (3,000-8,500 draws) | 48-66 ms (15-21 fps) |
+| Driving (~4,600-6,800 draws) | 63-79 ms (13-16 fps) |
 | Standing outdoors (~6,500-8,700 draws) | 56-60 ms (17-18 fps) |
 | Busy outdoor scenes (~7,500-9,500 draws) | 80-86 ms (12 fps) |
 | Memory | game process 14-16 GB resident |
