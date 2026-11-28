@@ -19,6 +19,7 @@ was measured on one machine (see the [README](../README.md)); other setups may d
 | Optional: frame generation | `amd_fidelityfx_framegeneration_dx12.dll` (FidelityFX SDK 2.4, `Kits/FidelityFX/signedbin`) in the same folder. Needs a diagnostics build. |
 
 AMD's and Microsoft's DLLs are not in this repository; get them yourself.
+How to apply and build the two patches: [patches/README.md](../patches/README.md).
 
 ## Build
 
