@@ -13,7 +13,7 @@ references such as `avatarmanz/VIctory-7900XTX#…` still name what was taken.
 **This repository contains no game files, code or assets.** You need your own copy of the game. It is
 not affiliated with or endorsed by the game's developer or publisher.
 
-## Where it stands (2026-11-27)
+## Where it stands (2026-11-28)
 
 Tested on one machine:
 
@@ -21,29 +21,28 @@ Tested on one machine:
 |---|---|
 | CPU | AMD Ryzen 9 5950X (16 cores, 32 threads) |
 | GPU | AMD Radeon RX 9070 XT, 16 GB (GFX1201) |
-| RAM | 32 GB, plus 32 GB of swap |
-| OS | Fedora 44, kernel 7.3.6, KDE Plasma 6.8.3 on Wayland |
+| RAM | 32 GB, plus swap |
+| OS | Fedora 44, kernel 7.3.6, KDE Plasma on Wayland |
 | Driver | Mesa 26.2.8 RADV |
-| Wine | Proton Experimental `experimental-11.0-20261112` with a patched wineserver (view tree, Wine bug 60868), in gamescope |
-| Direct3D 12 | vkd3d-proton's `d3d12core.dll` rebuilt with dxil-spirv `b540c8a2` |
-| Upscaler | PC FSR 4.1.2: 1920x1080 inside, 3840x2160 out |
+| Wine | Proton Experimental `experimental-11.0-20261112` with the view-tree wineserver and [`patches/wine`](patches/README.md), in gamescope |
+| Direct3D 12 | vkd3d-proton's `d3d12core.dll` with dxil-spirv `b540c8a2` and [`patches/vkd3d-proton`](patches/README.md) |
+| Upscaler | PC FSR 4.1.2: 1920x1080 inside, 3840x2160 out; FSR frame generation on |
 
-| Scene | Frame time |
-|---|---|
-| Standing in the house (~6,000-7,500 draws) | 57-61 ms (16.5-17.5 fps), with or without FSR 4 |
-| Busy scenes (8,000-10,000 draws) | 80-100 ms |
-| Playing | about 12-16 fps |
-| Memory | game process 14-16 GB resident |
+| Scene | Frame time (rendered) | Shown with frame generation |
+|---|---|---|
+| Standing outdoors (~6,500-8,700 draws) | 56-60 ms (17-18 fps) | ~34-36 fps |
+| Busy scenes (~7,500-9,500 draws) | 80-86 ms (12 fps) | ~24 fps |
+| Memory | game process 14-16 GB resident | |
 
-Faces, skin and clothes look right, plants no longer pop, night skies are right, and the picture is
-sharp with FSR 4. The CPU sets the frame, not the card: our submitting thread works the whole frame,
-much of it on Wine's cost of noticing the title's memory writes, while the card is about half busy.
+Every rendered frame gets one generated frame. It looks smooth, but input still follows the rendered rate.
 
-Known to be wrong: ~330 draws a frame are dropped (the ray-tracing builder is off,
-Belobug/VIctory-Belobug-AMD#269), indoor light is an approximation without ray tracing, loading the
+Faces, skin and clothes look right, plants no longer pop, night skies are right, the picture is sharp
+with FSR 4, and the game's UI stays steady with frame generation. The CPU sets the frame, not the card:
+one thread prepares and submits the title's work.
+
+Known to be wrong: with frame generation the edges of the screen flicker and full-screen effects such as the vignette can tear; ~330 draws a
+frame are dropped (the ray-tracing builder is off), so indoor light is an approximation; loading the
 world takes over 40 s, and memory grows with play time.
-
-How it got from ~575 ms a frame to here, run by run: [docs/linux-wine.md](docs/linux-wine.md).
 
 ## How to run it on Linux
 
@@ -53,25 +52,13 @@ Built on Linux with [cargo-xwin](https://github.com/rust-cross/cargo-xwin); no W
 git clone https://github.com/anoyarou/VIctory-RDNA4-linux
 cd VIctory-RDNA4-linux
 cp victory.example.toml victory.toml      # then set your paths, outside this folder
+scripts/linux/build-xwin.sh --diag
 ```
 
-[scripts/linux/](scripts/linux/README.md) builds it (`build-xwin.sh`) and starts it in gamescope
-(`run.sh`, `run-logged.sh`) with the settings measured here (`settings.sh`). What they need:
-
-- A Proton prefix, with a 64-bit Microsoft `d3dcompiler_47.dll` next to `victory.exe`.
-- A vkd3d-proton with dxil-spirv `694cc674` or later (vkd3d-proton master `71cae09` has it): with older
-  ones every frame waits 500 ms for six shadow pipelines. A rebuilt `d3d12core.dll` next to
-  `victory.exe` is enough.
-- A wineserver with the view-tree patch, or loading the world is far slower.
-- Resizable BAR (`VKD3D_CONFIG=ignore_shared_fence,descriptor_heap`).
-- For FSR 4.1.2 (optional): the FidelityFX SDK's `amd_fidelityfx_upscaler_dx12.dll` from a PC game, and
-  AMD's `amdxcffx64.dll` from AMD's Windows driver package in the prefix's `system32`.
-
-Every setting, with its reason and measurement: [docs/linux-wine.md](docs/linux-wine.md). Commands and
-debugging switches: [docs/README-fxceless.md](docs/README-fxceless.md); each `VICTORY_...` switch is
-described where the code reads it. Optional PlayStation button prompts:
-[docs/playstation-prompts.md](docs/playstation-prompts.md). Capturing and replaying a frame to find a
-picture fault: [docs/replay.md](docs/replay.md).
+What you need (Proton, the patches, the DLLs), the launch command and the settings that matter:
+**[docs/linux-wine.md](docs/linux-wine.md)**. Scripts: [scripts/linux/](scripts/linux/README.md).
+Optional PlayStation button prompts: [docs/playstation-prompts.md](docs/playstation-prompts.md).
+Finding a picture fault by capturing and replaying a frame: [docs/replay.md](docs/replay.md).
 
 ## Credits
 
@@ -91,6 +78,10 @@ from elsewhere name the commit and its author.
 - **borntofrag34**: the Wine branch of avatarmanz/VIctory-7900XTX#440; **LloydNicholson**: the plant fix
   (#437); **icecreammule277-dot**: `VICTORY_WC_NO_BACK` (Belobug/VIctory-Belobug-AMD#477); the authors of
   avatarmanz/VIctory-7900XTX#423, #429, #443, #446, #447, #448 and Belobug/VIctory-Belobug-AMD#512, #518.
+- **[Slaktarn700/SlaktarnVI](https://github.com/Slaktarn700/SlaktarnVI)**: FSR frame generation and its
+  UI-layer split (`e5b0dc81`); **[MTrv0/VIctory-AMD-UM](https://github.com/MTrv0/VIctory-AMD-UM)**: stale
+  texture slots brought up to date (`0074263a`); **[crossducking/RAZDA4A-XEN](https://github.com/crossducking/RAZDA4A-XEN)**:
+  the lighting settings.
 - **[maren-halv/VIctory-Fast](https://github.com/maren-halv/VIctory-Fast)**: watch-journal and heap-pass
   changes (`79a92c7`, `7da8eb5`).
 - **[fxceless/victory-fork](https://github.com/fxceless/victory-fork)**, **[DexNom/VIctory](https://github.com/DexNom/VIctory)**,

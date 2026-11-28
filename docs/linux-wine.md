@@ -1,392 +1,88 @@
-# Running under Wine/Proton on Linux (notes for this branch)
+# Running it on Linux (Wine/Proton, AMD RDNA 4)
 
-Upstream is now [Marvisak/VIctory](https://github.com/Marvisak/VIctory) (2026-11-27): the
-repositories this branch started from, avatarmanz/VIctory-7900XTX and Belobug/VIctory-Belobug-AMD,
-no longer open on GitHub. What follows is the history as it happened, with their commits and pull
-requests named as they were taken; the commits themselves are all in this branch.
+How to get the title running on Linux with this branch, and which settings matter. Everything here
+was measured on one machine (see the [README](../README.md)); other setups may differ.
 
-This branch, `rx9070xt-wine`, is Belobug/VIctory-Belobug-AMD's `rx9070xt` branch (the RX 7900 XTX
-fork, avatarmanz/VIctory-7900XTX, plus Belobug `81ebb7b` for the RX 9070 XT) with what our Wine runs
-needed ported from our earlier branch `speed-trial` (on Belobug `main`; archived as the tag
-`archive/speed-trial`, where every `speed-trial` commit named below can be found). That tag's
-`docs/linux-wine.md` has the measurements of 32 runs. On this branch, runs 33-43 (RX 9070 XT, RADV,
-Proton Experimental `experimental-11.0-20261112`, from a save, standing still in the first playable
-area) [measured on one machine].
-Runs 44-65 continued the same way (from 2026-11-27 standing at a snake terrarium in the house, a new save);
-the newest results are in the sections below, and the current state is summed up next.
+## What you need
 
-## Where it stands (2026-11-27, runs 59-94)
-
-- **Newest (runs 90-94):** night sky right with `VICTORY_AMBIENT=0.8` without the `,floor:0.6` (run 90); PC FSR 4.1.2
-  works under Proton (`VICTORY_FSR_4K=performance`, `FSR4_UPGRADE=1`: 1920x1080 inside, 3840x2160 out): sharper, no
-  obvious artifacts, 59-61 ms at the terrarium, the same as without it (run 94). Busy scenes 80-100 ms at 8,000-10,000
-  draws. Of a 70 ms busy frame, threads wait ~40 ms for write guards and ~17 ms changing page protections (Wine's
-  cost of noticing the title's writes); refreshes take ~18 ms, ~88 % of them finding nothing to copy.
-- **Picture:** plants near the player no longer pop (avatarmanz/VIctory-7900XTX#437, run 59); faces and skin right with
-  the defaults. `VICTORY_CARD_BUFFERS_MIN_MB=1` alone costs a one-colour couch texture and some artifacts (run 63);
-  with `VICTORY_CARD_BUFFERS_MIN_KB=64` and `VICTORY_CARD_BUFFERS_MB=4096` the couch is right again (run 70).
-- **Speed:** **57-59 ms a frame (17-17.7 fps)** standing at the terrarium (~7,500 draws) with `VICTORY_WC_NO_BACK=1`,
-  `VICTORY_CARD_BUFFERS_MIN_KB=64` and `VICTORY_CARD_BUFFERS_MB=4096` (run 70; ~14 of 16 GiB of VRAM). 59-61 ms with
-  `VICTORY_CARD_BUFFERS_MIN_MB=1` instead (run 65; 67 ms without `WC_NO_BACK`, run 63); ~12 fps
-  while playing [user, before run 65]. Our submitting thread sets the frame, not the card: card busy ~41 ms
-  (avatarmanz/VIctory-7900XTX#429's critical path, run 62).
-- **Settings to leave alone:** `VICTORY_SUBMIT_FRAMES=2` (no gain, waxy faces, run 60); `VICTORY_PORT_GUARD`/
-  `VICTORY_PORT_JOURNAL` (runs 44, earlier); #440's renderer-patch set `VICTORY_PORT_CONSTANTS/DESCRIPTORS/CBV=1` with its
-  60 fps pacing (161-176 ms and a too-dark floor here, run 64).
-- **`VICTORY_WC_NO_BACK=1`** (Belobug/VIctory-Belobug-AMD#477) alone: copy-back 27 -> 13 ms, picture right (run 65).
-- **`VICTORY_CARD_BUFFERS_MIN_KB=64` + `VICTORY_CARD_BUFFERS_MB=4096`** (Belobug/VIctory-Belobug-AMD#546; 63 -> 49 ms on a
-  9070 XT under Windows): here 59-60 -> 57-59 ms, copy-back ~12 -> 8-12 ms, couch right (run 70, `7d7800a`, Mesa 26.2.8).
-- **Wineserver:** runs 52-57 used stock Proton's by mistake (164 ms where the view-tree one gives 81 ms, run 58); our
-  launcher defaults to the patched one since.
-
-## Setup (verified on this branch unless marked)
-
-The scripts in `scripts/linux/` (2026-11-27) set up everything below except the DLLs: `run.sh` with
-`settings.sh`, `run-logged.sh` for measured runs, `build-xwin.sh`. They are the scripts runs 1-66 were made
-with, without this machine's paths; the window modes are verified (run 66), the rest as the runs below.
-
-- **Native Direct3D 12 and Microsoft's compiler:**
-  `WINEDLLOVERRIDES="d3d12,d3d12core,dxgi,d3d11,d3d10core=n,b;d3dcompiler_47=n"`, a 64-bit
-  Microsoft `d3dcompiler_47.dll` next to `victory.exe` (Belobug/VIctory-Belobug-AMD#183; #233 and
-  #243 propose a DXC fallback instead).
-- **`VKD3D_CONFIG=ignore_shared_fence,descriptor_heap`** (needs ReBAR); without `descriptor_heap`
-  RADV page-faulted at world load on `speed-trial`.
-- **wineserver with the view-tree patch** (Wine bug 60868, CachyOS/wine-cachyos#50) for loading;
-  see Marvisak/VIctory#834.
-- **Building from Linux:** `cargo xwin build --profile diag --target x86_64-pc-windows-msvc -p victory --features victory/diagnostics`.
-- **Memory:** this fork's README reports 40-46 GB private memory on Windows (64 GB recommended).
-  Under Wine the game process used 13.6-15.6 GB resident here (`speed-trial`: 10-11 GB); 32 GB with
-  swap was enough.
-- **vkd3d-proton with dxil-spirv from HansKristian-Work/dxil-spirv `694cc674` on.** With the
-  vkd3d-proton of Proton Experimental (and an older local build, dxil-spirv `7c048638`), six of the
-  title's ray-traced shadow compute shaders, as this branch translates them, send dxil-spirv into an
-  endless recursion (`CFGNode::find_common_dominator` <-> `recompute_immediate_dominator`, from
-  `flatten_subgroup_shuffles`). The log shows `victory-pipelines-N has overflowed its stack` about 5 s
-  in; Belobug `81ebb7b`'s compiler guard keeps the process alive, but the six pipelines stay "being
-  made" for the whole run. A bigger worker stack does not help (tried in `13e730d`, reverted in
-  `2d5fa28`). `694cc674` ("Only run fixup passes after structurizer has run") fixes it, found by
-  bisecting with the shaders translated natively (`victory_shader::emit::translate`) and dxil-spirv's
-  CLI. With master (`b540c8a2`) the six convert, `spirv-val` accepts them, and none of a run's 2,707
-  shaders fails. Beqren found the same with vkd3d-proton `71cae09` (avatarmanz/VIctory-7900XTX#111).
-  Used here without changing the prefix: vkd3d-proton's `d3d12core.dll` rebuilt with that dxil-spirv,
-  placed next to `victory.exe`. With `d3d12core=n,b` Wine loads a native DLL from the program's folder
-  before `system32`.
-- **The fork author's settings** (`scripts/play.ps1`, not `-Safe`): `VICTORY_THIN=1`,
-  `VICTORY_JOIN_PARTS=8`, `VICTORY_UPLOAD_AHEAD=1`, `VICTORY_RELAY=2`, `VICTORY_CARD_STEPS=2` and the
-  others listed there. Standing still: **575 ms a frame with this fork's defaults (run 33), 290-301 ms
-  with these (runs 34-36)**, while the times the frame line gives for our own work hardly changed.
-  Likely `VICTORY_THIN`, which takes the list calls off the title's threads (not tested alone).
-- **`VICTORY_FETCH_CHECK=1` with `VICTORY_RELAY=2`** (avatarmanz/VIctory-7900XTX#13, #138; #148 makes it
-  the default there). Without it the characters' skin looked oily or flat and the eyes wrong (runs
-  40-42): with `RELAY=2` a few fetched pieces of GPU copies are torn. In run 43 the check found 3-5
-  of ~970 a frame and fetched them again; skin right, no measurable cost. `RELAY=1` also fixes the
-  skin but cost ~25 ms a frame (run 41). `VICTORY_LAND_ECHO=0` (avatarmanz/VIctory-7900XTX#201, for
-  missing skin in #59) did not help here and sends GPU-written pages up again (run 42).
-
-## Changes on this branch
-
-| Commit | What |
+| Piece | Why |
 |---|---|
-| `76f8581` | `VICTORY_AMBIENT=<share>,floor:<level>`: the ambient stand-in's estimate, never below beloooo's constant. Indoors without rays the estimate feeds on itself (dark walls send out little), and a room stayed too dark at `0.8`. Used as `0.8,floor:0.6`; no measurable frame cost. **Dropped in run 90** (2026-11-27): with the floor, night scenes stayed lit, the exposure came down and the night sky went black; with `0.8` alone night outside matches a reference playthrough and rooms look right [user]. |
-| `fa54da3` | avatarmanz/VIctory-7900XTX#200 (`1b06b56`, amine23012004, after Kayotic1337 and zocram4cc on avatarmanz/VIctory-7900XTX#59): Wine refuses `NtQueryVirtualMemory` class 7, so no hole was ever known and each was asked about with `VirtualQuery` every frame (13,000-23,000 calls, reported). A private, reserved, `PAGE_NOACCESS` block now counts as a placeholder there. Reported: preparing 38-42 -> 24-28 ms on an RX 9070 XT. Here (run 43, with `FETCH_CHECK=1`, at the bunk, ~3,600 draws): **61-64 ms a frame (16 fps)**, against run 40's 64-68 ms at ~3,150 draws; write-watch asking 27-30 ms a frame against up to 78 ms. |
+| Your own copy of the game | Nothing from the game is in this repository. |
+| Proton Experimental, run in gamescope | The launcher in `scripts/linux/` expects both. |
+| A wineserver with the view-tree patch (Wine bug 60868, CachyOS/wine-cachyos#50) | Without it frames take about twice as long and loading is far slower. |
+| `patches/wine` built into that Proton (`win32u.so`, `wineserver`, `ntdll.so`) | Needed for the fastest setting below (port 1 as a dma-buf). Optional. Configure Wine with Vulkan, or `win32u.so` crashes at start. |
+| vkd3d-proton with dxil-spirv `694cc674` or later, plus `patches/vkd3d-proton` | Older dxil-spirv loops on six shadow shaders and every frame waits for them. The patch is needed for port 1 as a dma-buf. Put the rebuilt `d3d12core.dll` next to `victory.exe`. |
+| A 64-bit Microsoft `d3dcompiler_47.dll` next to `victory.exe` | Shader compiling. |
+| Resizable BAR on | `VKD3D_CONFIG=ignore_shared_fence,descriptor_heap` needs it. |
+| 32 GB of RAM plus swap | The game process takes 14-16 GB. |
+| Optional: FSR 4.1.2 | `amd_fidelityfx_upscaler_dx12.dll` (FidelityFX SDK) in a folder you name with `VICTORY_FIDELITYFX_DIR`, and `amdxcffx64.dll` from AMD's Windows driver package in the prefix's `system32`. |
+| Optional: frame generation | `amd_fidelityfx_framegeneration_dx12.dll` (FidelityFX SDK 2.4, `Kits/FidelityFX/signedbin`) in the same folder. Needs a diagnostics build. |
 
-## Where the frame went (runs 34-37), and why it is gone
+AMD's and Microsoft's DLLs are not in this repository; get them yourself.
 
-Standing still at ~290 ms a frame, every frame line said `500.0 ms waiting for pipelines` and
-`(6 being made)`: the layer's per-frame pipeline wait (`VICTORY_PIPELINE_WAIT_MS`) was spent on the six
-pipelines above, which never arrive. Meanwhile one title thread polled a counter (`mwaitx` and
-`Sleep(0)`, image `+0x4fb0bd0`, near the frame limiter of Marvisak/VIctory#2469) and the frame line
-showed ~215 ms between the title's submissions. With dxil-spirv `b540c8a2` (run 40): 0 ms waiting for
-pipelines, 3.4 ms between submissions, ~64 ms a frame; preparing (~57 ms) is what is left. Beqren saw
-the same on avatarmanz/VIctory-7900XTX#111; `VICTORY_PIPELINE_WAIT_MS=0` hides it without the fix.
+## Build
 
-## Merged from avatarmanz/VIctory-7900XTX `main` (`aad5ed5`, branch `rx9070xt-wine-am`; run 44)
+On Linux, with [cargo-xwin](https://github.com/rust-cross/cargo-xwin):
 
-avatarmanz `main` up to `a9400a6`, 161 commits. Switches worth trying under Wine, all off by default
-unless noted:
+```bash
+scripts/linux/build-xwin.sh --diag
+```
 
-- `VICTORY_PORT_GUARD=1` (renderer port 6, `cc761bf`): faults and refreshes share the guards' lock,
-  view memory is not asked of the kernel. In run 43 the threads waited 64 ms a frame for the guards and
-  spent 25 ms changing protections; reported on Windows: guard waits 29 -> ~2 ms, frame 47.2 -> 45.1 ms.
-  **Run 44** (at the bunk, ~3,540 draws): guard waits 64 -> 0.2 ms and kernel askings 34 -> 4.9 ms a
-  frame, but the frame only 61-64 -> 59-61 ms: those waits were mostly off the frame's critical path.
-  New in run 44: the inmates' uniforms look plastic. In run 45 (port 6 off, `AMBIENT_SETTLE` on as
-  before) they look normal, so most likely port 6 (not proven: run 45 also merged Belobug's branch).
-  avatarmanz/VIctory-7900XTX#270 measured port 6 slower under Wine. **Leave it off.** Also leave
-  renderer port 7 (`VICTORY_PORT_JOURNAL`) off: waxy skin under Proton there.
-- `VICTORY_PORT_CBV=1` (renderer port 5, `0dec5dc`): constant buffers read in place, ~22,000 fills a
-  frame fewer (reported). Not `VICTORY_PORT_CONSTANTS=1`: black world frames on RADV
-  (avatarmanz/VIctory-7900XTX#163).
-- `VICTORY_PLANES` (two-plane compose, `85a663d`, `0ce46d5`), on by default there. It does **not** stop
-  the logo videos jumping (run 44).
+or by hand: `cargo xwin build --profile diag --target x86_64-pc-windows-msvc -p victory --features victory/diagnostics`.
+The diagnostics build is the one measured here (frame generation and the stats panel need it).
 
-## Merged from Belobug/VIctory-Belobug-AMD `rx9070xt` (`ba3cc52`, branch `rx9070xt-wine-am`; run 45)
+## Run
 
-Belobug rebuilt `rx9070xt` (`a-publier` is the same commit, `cd8dfc0`) on avatarmanz `main` `c9c932c`
-(renderer port 7, off) with three commits: `e942896` (the RX 9070 XT fixes and the HUD on that base,
-VRAM keep thresholds 85/93 %), `5d6bd84` (changed title textures uploaded on the submitting list's
-prelude, not a frame late; Belobug/VIctory-Belobug-AMD#279) and `cd8dfc0` (PC FSR 4.1.2 to 4K,
-`VICTORY_FSR_4K`, from DexNom/VIctory `ab34a8b2`; not tried: it asks for a 4.1.2 provider).
+`scripts/linux/run.sh` starts the title in gamescope with the settings of `scripts/linux/settings.sh`;
+`run-logged.sh <name>` does the same and keeps a log. Set `TITLE_EXE`, `WINEPREFIX` and `PROTON_DIR`
+first (see the scripts' headers). The fastest setup so far:
 
-**Run 45**, with `RADV_EXPERIMENTAL=transfer_queue` (vkd3d-proton's copy queue on SDMA,
-avatarmanz/VIctory-7900XTX#111) and port 6 off [measured on one machine, user's eyes for the picture]:
-- the intro logo videos no longer jump (likely `5d6bd84`); uniforms and skin right;
-- at the bunk at ~2,400-3,300 draws **57-62 ms a frame**, preparing 50-53, **copy-back 24-27 ms**
-  (run 44: 38-39; `transfer_queue` and the merge not separated); draws in view vary much more than
-  before (up to ~11,400; 72-75 ms at ~7,000);
-- dropped ~330 draws a frame without a host pipeline: expected with the ray-tracing builder off
-  (Belobug/VIctory-Belobug-AMD#269);
-- game process up to 15.6 GB resident.
+```bash
+export VICTORY_PORT_CONSTANTS=1 VICTORY_PORT_SECTION=1 VICTORY_PORT_CONSTANTS_ORDER_BATCH=1
+export VICTORY_FIDELITYFX_FRAMEGEN=1        # frame generation, if you have the DLL
+export VICTORY_AMBIENT=0.75 VICTORY_AMBIENT_AIR=1.5 VICTORY_AMBIENT_REFLECT=1.0
+scripts/linux/run-logged.sh play
+```
 
-Not taken: Marvisak/VIctory#3069 and #3199 (copy-back through a view of our own): this base already
-lands beside the guards (`VICTORY_LAND_BESIDE`, on; 764 of 1,319 pieces a frame in run 43).
+The first line needs the patched Wine and vkd3d-proton; without them leave it out (a few ms slower).
 
-## Picked up 2026-11-27 (`cacc825`; run 57)
+## Settings that matter
 
-`rx9070xt-wine` is again the one branch: it was fast-forwarded to the former trial branch
-`rx9070xt-wine-am`, which only added commits on top of it.
-- Serph91P/VIctory-7900XTX@75f6b933: live-quad handling restored when a translation retry
-  unwinds (fix-up for avatarmanz/VIctory-7900XTX#354, which this branch carries).
-- avatarmanz/VIctory-7900XTX#390 (`a89d3921`): textures the title rewrites in place (TV and phone
-  video) looked at every frame, fingerprinted whole; `VICTORY_LIVE_TEXTURES=0` turns it off.
-- The save part of Belobug/VIctory-Belobug-AMD@705a2d09: an older save version that cannot be removed
-  no longer hides the newest one.
-- Belobug/VIctory-Belobug-AMD `a-publier` `4eb6cfd` merged (49 commits since `cd8dfc0`): among them #324
-  (a size query is not reused; AMD's compiler crashed on 29 compute pipelines on RDNA4), #354 (port 2
-  sync), #343 (`VICTORY_PROFILE` no longer crashes), #336 (FSR 3.1 fallback for `-Fsr4K`). Translator
-  version `0x4c00_0005`.
-
-Not taken: Belobug `main`'s sky-following ambient (`705a2d09`, `e48eb83e`, `4f62c2a5`, `c3bd5612`) builds
-on sky-finding code this branch's ambient stand-in (avatarmanz's estimate) does not have; its plan
-rebuild change has no counterpart here. avatarmanz's `VICTORY_PORT_CONSTANTS_ORDER` works only with
-renderer port 1 (off here).
-
-**Run 57** [measured on one machine, user's eyes for the picture]: PlayStation prompts and Settings
-picture right; the user found the picture better and the frame rate worse. From a new save (the first
-mission done), standing at the aquarium at ~8,000 draws: **164 ms a frame** (120-216), preparing 116,
-GPU ~1, copy-back 26, texture refreshes 130 ms a frame over all threads; game process up to 16.4 GiB
-resident, 2.6-3.1 GiB of swap used by then, so memory pressure may be part of it. Not compared at the
-same spot with an earlier build. Run 57 (like runs 52-56) ran on stock Proton Experimental, not the
-view-tree wineserver of the setup above, so its frame time is not comparable with run 45's; the
-same spot (a snake terrarium) on the view-tree wineserver, **run 58: 81 ms a frame** (72-91) at
-~7,800 draws, preparing 66, copy-back 28, texture refreshes 24 ms a frame: in line with run 45's
-72-75 ms at ~7,000 draws. The new commits, #390 included, cost nothing visible here. Untested: TV/phone video.
-
-## Picked up 2026-11-27, second round (`e5efd8c`; runs 59-61)
-
-Cherry-picked on `725c580` (each commit names its PR):
-- avatarmanz/VIctory-7900XTX#437 (`VICTORY_TWIN_EXACT`, on): raw twins of buffer views not on 16 bytes begin at the view's
-  own dword instead of being null views. Conflict in `descriptor.rs` `sync_line`: the port-1 in-place indirect line was left
-  out (port 1 is not on this branch). **Fixes the plants popping near the player under Wine** (run 59, verified in game).
-- avatarmanz/VIctory-7900XTX#423 (`VICTORY_FILE_CACHE`, on), #447 (`VICTORY_KEEP_PAGES`, off), #448, #443
-  (`VICTORY_LIBRARY_PREFETCH`, off), #446; Belobug/VIctory-Belobug-AMD#512, #518. Carried over, not measured one by one.
-
-Measured: ~71-72 ms a frame standing at ~4,600 draws (run 59); "on the GPU" ~0 (only a synchronous wait, see #429 below), preparing (~61 ms) and copy-back
-(~28 ms). `VICTORY_SUBMIT_FRAMES=2` gives no speed and brings back waxy faces / heads of another colour
-(run 60; normal again without it, run 61): leave it unset. Marvisak/VIctory#3487 and #3484 do not apply (`bindless.rs`
-is not in this line).
-
-Then avatarmanz/VIctory-7900XTX#429 (`f92ad0e`, 3 commits, clean; instrumentation, off by default):
-`VICTORY_CRITICAL_PATH=1` gives one line a frame with the three chains and the refresh flushes; the fps line ends with
-the card's busy ms/frame by our fence clock. Built, not run yet.
-
-## Merged 2026-11-27: avatarmanz/VIctory-7900XTX#440 and Belobug/VIctory-Belobug-AMD#477 (`d81130d`)
-
-Run 62 (#429's critical path) showed our submitting thread sets the frame (75 ms; the card busy 41-42 ms):
-Present/copy-back ~29 ms and refresh flushes ~22 ms. Run 63's `VICTORY_CARD_BUFFERS_MIN_MB=1` took it to 66.7 ms
-(compares ~130 -> ~29 MB a frame) at the cost of a one-colour couch texture and some artifacts [user].
-
-- **avatarmanz/VIctory-7900XTX#440** (borntofrag34, merge `53327b0`; it carries avatarmanz `main` `014d52de`): Wine
-  fixes that make renderer patches 1, 2 and 5 work under RADV (`VICTORY_PORT_HOME`: patch 1's heap as one anonymous
-  mapping, no black picture; `VICTORY_CLAMP_SYNC`: clamp waits as enhanced barriers), `VICTORY_WINE_MAP` (overlaps our
-  view-tree wineserver), `SINGLE_LATCH`/`PIPELINE_WATCH` (dxil-spirv stack), `LIBRARY_NULL` (the pipeline library is
-  kept under Wine), `COMPUTE_WAIT_MS` (faces on cold caches), `FRAME_INTERVAL_DRAWS`, `JOIN_PARTS_DRAWS`, `scripts/play.sh`
-  and `play-1080p.sh`. Reported there: 2.3 -> 36 fps on an RX 7900 GRE, first scene, 1080p. Its own findings are kept in
-  `docs/linux-wine-pr440.md`. Merge notes: our #314 reflection hold with `AMBIENT_RT`'s band; #437's count beside port 1's
-  line; #440's compute wait uses #448's per-pipeline waiters (the shared `DONE` is gone on our branch).
-- **Belobug/VIctory-Belobug-AMD#477** (icecreammule277-dot, 7 commits on our base `4eb6cfd`): `VICTORY_WC_NO_BACK=1` keeps
-  shaders' writes into write-combined title memory on the card (no snapshot, compare or copy-back); `VICTORY_WC_CENSUS=1`
-  checks that the title does not read them; `VICTORY_WC_STATS=1`. Reported: copy-back 34.8 -> 17.2 ms (7900 XTX), and
-  33 -> 28 ms a frame on top of #440 under Wine.
-
-**Run 64** (`d81130d`, our settings + `CARD_BUFFERS_MIN_MB=1` + #440's `play-1080p.sh` set: `VICTORY_PORT_CONSTANTS=1`,
-`PORT_DESCRIPTORS=1`, `PORT_CBV=1`, `FRAME_INTERVAL_MS=16.667`, `FRAME_INTERVAL_DRAWS=500`, `JOIN_PARTS_DRAWS=500`, plus
-`WC_NO_BACK=1`) [measured on one machine]: shaders translated again (logo video 20-27 fps for ~30 s, then 30). At the
-terrarium, every pipeline made, ~4,140 draws: **161-176 ms a frame**, against 67 ms in run 63. Card busy 107-112 ms
-(41), Present 94.6 ms (19.6), refresh flushes 102 ms (22.5), **copy-back 4-10 ms (27)**. The house floor much too dark
-[user]. `PORT_HOME` was active and nothing failed. On this card with these settings the renderer patches cost far more
-than they gain, the opposite of #440's RX 7900 GRE; not yet known which of the patches, the pacing or the merged ambient
-code darkens the floor.
-
-**Run 65** (`d81130d`, our settings + `CARD_BUFFERS_MIN_MB=1` + `WC_NO_BACK=1` only): the floor right again, so the
-patches or the pacing darkened it. Terrarium, ~5,950 draws: **59-61 ms** (run 63: 67), copy-back 13 ms (27), Present
-16.8 ms, refresh flushes 21.2 ms, card busy 34-36 ms; no errors [measured on one machine].
-
-## Merged 2026-11-27, third round (`45497e9`; `7d7800a` without #478, runs 67-69)
-
-Seven open PRs that merged with no conflicts, one merge commit each (`6fe8b1f`..`45497e9`); #478 was reverted after runs
-67-68. **Run 69** (`7d7800a`, the other six, Mesa 26.2.8): terrarium, standing, ~7,000 draws, **59-60 ms**, copies 61-63 MB,
-refresh flushes 21.6 ms, picture normal [user]: the same as run 65, so the six neither gain nor cost measurably standing
-still [measured on one machine]. **Run 70** (same build, + `CARD_BUFFERS_MIN_KB=64`, `CARD_BUFFERS_MB=4096`): ~7,500 draws,
-**57-59 ms**, copy-back 8-12 ms (0.6 MB), refresh flushes 21.6 ms; couch texture right [user]; VRAM 13.9 GiB used.
-
-- **Belobug/VIctory-Belobug-AMD#636** (MamaLeVrai): a slot flipped ahead under relay 2 waits for the submissions begun
-  when it was queued (part of Belobug/VIctory-Belobug-AMD#545). Candidate for the waxy faces with `VICTORY_SUBMIT_FRAMES=2`.
-  Run 67 (1.4-1.6 s a frame) was first blamed on it and the merge reverted; run 68 without it was as slow, so it was
-  restored (`7d7800a`). Its own effect is untested here.
-- **avatarmanz/VIctory-7900XTX#438** (HAL9000RELOADED): `VICTORY_PORT_CONSTANTS_ORDER_BATCH=1` (off) clamps a run of
-  port 1's in-place indirect executions in one pass. Reported 68 -> 40 ms on an RX 7900 XTX (Windows); slower on an RTX 5090
-  under Proton. For run 64's slow renderer patches.
-- **Belobug/VIctory-Belobug-AMD#569** (BlueCatsz, for #500): a one-time coherency probe before in-place memory is used;
-  under Wine vkd3d-proton can open a file-backed heap that is zero-filled and not connected. Possible cause of run 64's
-  dark floor.
-- **avatarmanz/VIctory-7900XTX#457** (delacor): thin replays reuse finished host lists (`VICTORY_LIST_CREATE_POOL=0`: old path).
-- **Belobug/VIctory-Belobug-AMD#478** (cmt8): the write guard makes only view memory read-only (under Wine a thread's
-  stack in a guarded range was made read-only and the kernel ended the process); one `VirtualQuery` a region.
-  **Reverted (`f9eae87`): it does not fit `VICTORY_WINE_MAP`.** It guards a block only if `VirtualQuery` reports a mapped
-  view; with avatarmanz/VIctory-7900XTX#440's `VICTORY_WINE_MAP` (on under Wine) the title's pages are host `mmap`s that Wine
-  reports as private memory, so they were never guarded and were copied every frame: runs 67-68, copies up 8-10 GB a frame
-  (run 65: 58 MB), 1.2-1.6 s a frame [measured]. The crash it fixes (a stack between section views) needs the view
-  layout that `WINE_MAP` replaces.
-
-  | at the terrarium, standing | without #478 (runs 65, 69) | with #478 (runs 67, 68) |
-  |---|---|---|
-  | copies up per frame | 58 / 62 MB | 7,951 / 10,205 MB |
-  | frame | 59-61 / 59-60 ms | 1,238 / 1,589 ms |
-
-  How to see it: the PR's `memory in a range asked about as a view is no view` lines (it prints 16 at most). In run 68
-  all 16 were `kind=0x20000` (`MEM_PRIVATE`), `protection=0x4`, about 224 MB, the first at startup. If both are ever
-  wanted in one tree, one way (untried) is to count committed private memory inside the title's own reservations
-  (`wine_map`'s `Spaces`) as a view in #478's `there()`; the stack case it fixes lies outside them.
-- **avatarmanz/VIctory-7900XTX#450** (UwUCammie): `VICTORY_EARLY_SCREEN_MAX_BYTES` (off unless set) compiles small screen
-  pipelines at creation.
-- **Belobug/VIctory-Belobug-AMD#625** (11run11): texture store kept levels bounded by host memory; only with
-  `VICTORY_TEXTURE_STORE`.
-
-Left out: avatarmanz/VIctory-7900XTX#436 (`FILL_FORWARD`; an ownership bug reported in review), Marvisak/VIctory#3535 and
-#3516 (conflict throughout), Belobug/VIctory-Belobug-AMD#622 (conflicts in `pipeline/make.rs`).
-
-## Ported 2026-11-27 from maren-halv/VIctory-Fast (`b109dc2`; untested in game)
-
-maren-halv/VIctory-Fast (GPL-3.0; Windows 11, RX 9070 XT, AMD's driver) shares no history with this
-branch, so these are hand ports, each naming its commit. What was looked at and left out, and why:
-`VICTORY-FAST-STUDY.md` in the user's notes (not in this repository).
-- `79a92c7`: per-shard latest asking (`max_written`) in the watch journal; `nothing_new` passes over shards
-  with nothing newer than the lowest asking its pages were taken after (`Notes::all_below`), with no
-  gathering or sorting. The heap pass looks at each slot once.
-- `7da8eb5`: the heap pass mirrors through `HostHeap::mirror_heap_pass`, which does not requeue the slot in
-  `buffer_changes`; a slot a draw read through a table lately is not requeued when seen.
-- Aimed at run 91's busy frames (70.8 ms at 7,883 draws): 7,759 refreshes a frame on the submitting thread,
-  6,769 known to copy nothing, 19.6 ms.
-- Not ported: `008f546`/`c827852`'s skip of covered refresh steps (here `Batch::add` already returns after
-  one lookup for them), `VICTORY_PORT_EXPAND` and `VICTORY_INPLACE_SECTIONS` (title memory in place: RADV
-  cannot import section views under Wine; port 1 gave dark frames, run 64), `VICTORY_GPU_ONLY_COPYBACK`
-  (off in their own benchmark; skips write-backs the title may read), native DXR, and DXIL tuning for AMD's
-  Windows compiler.
-
-**PC FSR 4.1.2 (`VICTORY_FSR_4K`), set up, untested:** `scripts/linux/run.sh` takes
-`VICTORY_FSR_4K=quality|balanced|performance`. It needs the FidelityFX SDK's
-`amd_fidelityfx_upscaler_dx12.dll` (4.1.1.2740 from a PC game works as the loader) in `VICTORY_FIDELITYFX_DIR`,
-and FSR 4.1.2 itself from AMD's driver part `amdxcffx64.dll` (in AMD's Windows driver package; carries
-`4.1.2`/`FSR4`) in the prefix's `system32`, as Proton's own FSR 4 upgrade does. The title then draws for
-3840x2160, rendering 2560x1440, 2259x1270 or 1920x1080 inside.
-Proton's `amdxc64.dll` hands the SDK AMD's FSR 4 only with `FSR4_UPGRADE` set (`run.sh` sets it with
-`VICTORY_FSR_4K`): without it the SDK offered FSR 3.1.5 only (run 92); with it "4.1.2 *" was selected and its
-context made on the host (run 93, `WINEDEBUG=+amdxc`: "Replaced FSR3 with FSR4!"). Picture not yet seen.
-
-## Ported from `speed-trial`
-
-| Commit there | Here | What |
-|---|---|---|
-| `d6acf71` (Belobug/VIctory-Belobug-AMD#124) | `7de928a` | Empty pipeline library from a null blob; vkd3d-proton refuses a pointer with no bytes. |
-| `6ef5207` (Marvisak/VIctory#2644) | `5a08439`, `fd00e1e` | `VICTORY_STEP_OVER=63966f,5149aec` (diagnostics builds) steps over the intro's pool stop (Marvisak/VIctory#698). |
-| `b66e7c8` | `3780e16` | The title's stall watchdog patched out of the known build (Marvisak/VIctory#630); `VICTORY_KEEP_WATCHDOG=1` keeps it. |
-
-## Not ported, because this base already does it another way
-
-| `speed-trial` | Here instead |
+| Setting | Effect |
 |---|---|
-| Belobug/VIctory-Belobug-AMD#53: title memory copied, not used in place | In place only with `VICTORY_INPLACE=1` (off). |
-| Belobug/VIctory-Belobug-AMD#69: no sparse copies under Wine | No sparse (reserved) copies of title memory. |
-| `b394ba9`, run-only write-back (Marvisak/VIctory#721, #1024) | `Shadow::copy_back_with` writes only the dwords the card changed (`put_changed`). |
-| `7da3f69`, memory asked of the kernel once per submission | `VICTORY_ASK_ONCE`, on by default. |
-| `e6c7083`, `VICTORY_MERGE_LISTS` | `VICTORY_JOIN_PARTS` / `VICTORY_JOIN_LISTS` (off by default). |
-| `2f4762e`, `changed_runs` by words; Belobug/VIctory-Belobug-AMD#123 AVX2 merge | Word and AVX2 compares of its own. |
-| `7e67c48`, `c727353`, `VICTORY_BESIDE` | `VICTORY_COPY_BESIDE`, `VICTORY_STORE_BESIDE`. |
+| `WINEDLLOVERRIDES="d3d12,d3d12core,dxgi,d3d11,d3d10core=n,b;d3dcompiler_47=n"` | Native Direct3D 12 and Microsoft's compiler (set by `run.sh`). |
+| `VKD3D_CONFIG=ignore_shared_fence,descriptor_heap` | Without `descriptor_heap` the card faulted at world load. |
+| `settings.sh` (`VICTORY_THIN=1`, `VICTORY_RELAY=2`, `VICTORY_CARD_STEPS=2` and others) | Took a frame from ~575 ms to ~300 ms. Keep them. |
+| `VICTORY_FETCH_CHECK=1` | Needed with `RELAY=2`, or skin looks oily and eyes wrong. |
+| `VICTORY_WC_NO_BACK=1` | Halves the copy-back time. |
+| `VICTORY_CARD_BUFFERS_MIN_KB=64`, `VICTORY_CARD_BUFFERS_MB=4096` | A little faster, textures right. |
+| `VICTORY_PORT_CONSTANTS=1` + `VICTORY_PORT_SECTION=1` + `VICTORY_PORT_CONSTANTS_ORDER_BATCH=1` | The fastest setup (about 13 % faster). Port 1's heap goes to the card as a dma-buf instead of a buffer the kernel walks at every submission, and its draws' clamps run in one pass. `PORT_CONSTANTS=1` alone, or without the patches, is slower than off. |
+| `VICTORY_FSR_4K=quality\|balanced\|performance` with `FSR4_UPGRADE=1` | PC FSR 4.1.2 (`run.sh`; default `performance`: 1080p inside, 4K out). Without `FSR4_UPGRADE=1` Proton offers only FSR 3.1.5. |
+| `VICTORY_FIDELITYFX_FRAMEGEN=1` | FSR frame generation (from Slaktarn700/SlaktarnVI). Roughly doubles the shown frames; feels poor when the real frame rate is low. The game's UI and the stats panel are kept out of the interpolation (`VICTORY_FG_UI_LAYER=0`: not). |
+| `VICTORY_AMBIENT=0.75`, `VICTORY_AMBIENT_AIR=1.5`, `VICTORY_AMBIENT_REFLECT=1.0` | Light without ray tracing (the settings of crossducking/RAZDA4A-XEN). Don't add a `,floor:` to `VICTORY_AMBIENT`: night skies go black. |
+| `VICTORY_STALE_TEXTURES=start` | The old rule that left some flags, walls and clothes black (MTrv0/VIctory-AMD-UM). Leave unset. |
+| `GAMESCOPE_MODE=windowed\|borderless\|fullscreen`, `GAMESCOPE_OUT_W/H` | Window mode and size (`run.sh`). Super+F toggles fullscreen. |
 
-Left for later, if a run shows the cost: `e423553` (under Wine, write watching asks about whole
-allocations from a cache, after Slaktarn700/VIctory `4f9aa10c`, `27eefe4e`), `7f72875` (copies
-remember unmapped title memory), `4fa10ea` (pins per block; this base has no pins list),
-`8ea54da` (fill merging; no gain on `speed-trial`), and `speed-trial`'s copy-back timers.
+Leave these off: `VICTORY_SUBMIT_FRAMES=2` (waxy faces, no gain), `VICTORY_PORT_GUARD` and
+`VICTORY_PORT_JOURNAL` (plastic or waxy skin), `VICTORY_PORT_HOME` (very slow under Wine).
 
-Tests: `victory-game` and `victory-loader` unit tests pass under Proton's `wine`; `load_probe` fails
-there because it starts `cargo` from inside Wine (`Invalid handle`), not because of the code.
-`victory-gpu`'s test binary printed nothing under Wine here (it needs the host's graphics DLLs set
-up), so the ambient change was checked in the game (its shader compiled and ran) rather than by
-`ambient::tests`.
+## Known problems
 
-Fixed in run 45: the logo videos jumped back and forth since this base (runs 33-44); gone with Belobug
-`5d6bd84` (see above).
+- With frame generation the screen's edges flicker (strongest at the bottom) and full-screen effects such as the vignette can tear between frames.
+- ~330 draws a frame are dropped (the ray-tracing builder is off), so indoor light is an approximation.
+- Loading the world takes over 40 s; memory grows with play time.
+- The CPU sets the frame: one submitting thread, much of it Wine's cost of noticing the title's memory writes.
 
-Fixed in run 46: mouths stayed shut in dialogue (runs 33-45). `9274523` brings avatarmanz/VIctory-7900XTX#114
-(the face network's `_d16` accesses through table views), fxceless/victory-fork#927's half views and
-Beqren's raw typed loads (`1711cd1c2`, `VICTORY_RAW_TYPED_LOADS`, on), as bordersky/victory-linux
-carries them; on Radeon under Proton #114 alone tears the mouths (Fedalv, comments on #114). Mouths
-move [user]; at the bunk at ~7,000 draws 72.5-76 ms a frame against run 45's 72-75 ms [measured]. The
-first run translates every shader again (new `TRANSLATOR_VERSION`): ~90 s of slow frames.
+## Debugging
 
-## Port 1 as a dma-buf (2026-11-28, runs 108-121, RX 9070 XT, PCIe 3.0)
+Capturing a frame and replaying it to find a picture fault: [replay.md](replay.md). Commands and
+debugging switches: [README-fxceless.md](README-fxceless.md); each `VICTORY_...` switch is described
+where the code reads it. The history of what was tried and measured is in this file's git history.
 
-What made renderer port 1 (`VICTORY_PORT_CONSTANTS=1`) slow under Wine, and what fixed it. Clothes shop, standing,
-~8,000 draws.
+## Where the changes came from
 
-| Setup | Frame (median) |
-|---|---|
-| Port 1 off | 58.0 ms (run 115) |
-| Port 1, home heap as userptr (`VICTORY_PORT_HOME`) | 150+ ms (run 108) |
-| Port 1, section as dma-buf, clamps alone | ~66 ms (runs 114, 116) |
-| **Port 1, section as dma-buf, `VICTORY_PORT_CONSTANTS_ORDER_BATCH=1`** | **50.6 ms (run 121)** |
-
-1. **The userptr walk:** a heap opened on an address is a userptr buffer. amdgpu walks all its pages
-   (`amdgpu_hmm_range_get_pages`) at every command submission, holding the process's `mmap_lock`: ~700 a second at
-   1.6 ms each for the 185 MB heap, with every `mprotect`, `mmap` and page fault queued behind it (perf probes, run
-   108).
-2. **The fix:** `VICTORY_PORT_SECTION=1` opens the heap on the section itself (`OpenExistingHeapFromFileMapping`,
-   home path off). With `patches/wine` and `patches/vkd3d-proton`, Wine turns the section's memfd into a dma-buf
-   (udmabuf), which amdgpu maps once. The walks went to 0, and `mprotect` lock waits fell from 6.2 s to 6 ms per
-   10 s (run 114). A probe checks that the card reads the section; if not, the stretch is copied as before.
-3. **The clamps:** with port 1, each indirect execution whose arguments are in place is clamped alone, between two
-   full waits (`draw.rs` `in_place_order`). RGP showed 2,569 such clamps a frame, and the card's time per frame at
-   22.7 ms against 12.1 ms with port 1 off (runs 119-120). `VICTORY_PORT_CONSTANTS_ORDER_BATCH=1` clamps each run
-   of them in one pass (avatarmanz/VIctory-7900XTX#438): the GPU wait goes from 11-12 ms to 0. No plant pop-in at
-   the clothes shop; the boat cutscene, where it showed before, is not yet checked.
-
-Run with: `VICTORY_PORT_CONSTANTS=1 VICTORY_PORT_SECTION=1 VICTORY_PORT_CONSTANTS_ORDER_BATCH=1`, the patched Proton
-and `d3d12core.dll`. Still open: the draws are 9-22 % slower with port 1 (constants read over PCIe 3.0 from
-system memory, unconfirmed).
-
-### Future work (after run 121)
-- Check the boat cutscene for plant pop-in with `ORDER_BATCH=1`, then make the three settings and the patched Proton
-  the default in `scripts/linux/`.
-- A/B `VICTORY_PORT_CBV=1`, the `ORDER_BATCH` limit and `VICTORY_CARD_AWAKE=0`: they only mean something now that
-  port 1 works.
-- The submitting thread sets the frame again (preparing ~43 of ~52 ms; copies 22.5 ms, 43 MB): profile it. Other
-  sections of title memory could go in place as dma-bufs too, once page-pool remaps are handled.
-- Fewer kernel submissions (~3.5 per submission of ours); the draws' 9-22 % slowdown over PCIe 3.0, only once the
-  card limits the frame.
-- Rebase `patches/wine` with each Proton update (configure with Vulkan).
-
-## FSR frame generation (diagnostics, off by default)
-
-Hand-ported from Slaktarn700/SlaktarnVI `e5b0dc81` (GPL-3.0; no shared
-history): `crates/victory-gpu/src/framegen.rs` (+ `framegen/camera.rs`),
-`HostList::move_texture`, the presenter hooks in `host.rs`
-(`Presentation::create`, `keep_hudless`, `prepare`, `presented`) and the
-upscale's constants from `victory-hle`'s `fidelityfx.rs`. Turn on with
-`VICTORY_FIDELITYFX_FRAMEGEN=1` beside `VICTORY_FIDELITYFX_DIR`, which must
-also hold `amd_fidelityfx_framegeneration_dx12.dll` (AMD FidelityFX SDK 2.4,
-`Kits/FidelityFX/signedbin` in GPUOpen-LibrariesAndSDKs/FidelityFX-SDK).
-Left out: SlaktarnVI's UI-layer split (`draw.rs` `keep_frame_before_ui`,
-`ui_layer_to_proxy`; so the HUD is interpolated with the frame), the ML
-mode `=4` with its camera capture, the panel's shown-frame rate and
-`VICTORY_FG_SENT_AHEAD` (presents stay sent ahead as before). Untested.
+The commits name their sources. The main ones: avatarmanz/VIctory-7900XTX and Belobug/VIctory-Belobug-AMD
+(the base and RX 9070 XT fixes), avatarmanz/VIctory-7900XTX#200 (Wine's missing memory query), #437 (plant
+pop-in), #438 (batched clamps), Belobug/VIctory-Belobug-AMD#477 and #546, maren-halv/VIctory-Fast `79a92c7`
+and `7da8eb5`, Slaktarn700/SlaktarnVI `e5b0dc81` (frame generation), MTrv0/VIctory-AMD-UM `0074263a`
+(stale texture slots), HansKristian-Work/dxil-spirv `694cc674`.
