@@ -4089,6 +4089,68 @@ impl State {
         out
     }
 
+    /// Frame generation: at a full-screen draw that lays the UI layer over
+    /// the frame ([`crate::pipeline::host::HostPipeline::over`]), the target
+    /// as it is before it ([`crate::framegen::keep_before_ui`]).
+    #[cfg(feature = "diagnostics")]
+    fn keep_frame_before_ui(&self, list: &HostList) {
+        const COPY_SOURCE: u32 = 0x800;
+        if !crate::framegen::enabled() || self.targets.len() != 1 {
+            return;
+        }
+        let Some(p) = crate::pipeline::host_pipeline(self.pipeline as This) else { return };
+        if !p.over {
+            return;
+        }
+        let target = self.targets[0] as This;
+        let (Some(host), Some(texture)) = (crate::host::host(), crate::resource::host_resource(target).cloned()) else {
+            return;
+        };
+        crate::list::ensure_state(list, target, COPY_SOURCE);
+        crate::framegen::keep_before_ui(&host.device, list, &texture);
+    }
+
+    /// Frame generation: the UI layer that draw lays over the frame goes to
+    /// the proxy swap chain instead ([`crate::framegen::keep_ui_layer`]);
+    /// true if the draw is to be left out.
+    #[cfg(feature = "diagnostics")]
+    fn ui_layer_to_proxy(&self, list: &HostList) -> bool {
+        const SHADER_READ: u32 = 0x40 | 0x80;
+        if !crate::framegen::enabled() || self.targets.len() != 1 {
+            return false;
+        }
+        let Some(p) = crate::pipeline::host_pipeline(self.pipeline as This) else { return false };
+        if !p.over {
+            return false;
+        }
+        let Some(target) = crate::resource::host_resource(self.targets[0] as This) else { return false };
+        // SAFETY: a live resource.
+        let size = unsafe { target.GetDesc() };
+        let size = [size.Width as u32, size.Height];
+        // The layer: the texture of the target's size its pixel stage reads.
+        let mut layer = None;
+        for stage in p.stages.iter().filter(|s| s.shader.stage == "pixel") {
+            for u in &stage.translated().used {
+                let (RootType::Table, Some(Root::Table(table))) = (u.root, self.roots_ref(false).get(usize::from(u.slot))) else {
+                    continue;
+                };
+                let handle = table + u64::from(u.table_offset_dwords) * 4;
+                if let Some(View::Shader(r, _)) = crate::descriptor::view(handle)
+                    && let Some(t) = crate::resource::host_resource(r as This)
+                {
+                    // SAFETY: a live resource.
+                    let d = unsafe { t.GetDesc() };
+                    if [d.Width as u32, d.Height] == size {
+                        layer = Some((r as This, t.clone()));
+                    }
+                }
+            }
+        }
+        let (Some((resource, texture)), Some(host)) = (layer, crate::host::host()) else { return false };
+        crate::list::ensure_state(list, resource, SHADER_READ);
+        crate::framegen::keep_ui_layer(&host.device, list, &texture, size)
+    }
+
     pub(crate) fn draw(
         &mut self,
         list: &HostList,
@@ -4101,6 +4163,15 @@ impl State {
         self.run.end();
         #[cfg(feature = "diagnostics")]
         self.trace("draw", vertices, first);
+        // Frame generation (SlaktarnVI e5b0dc81): the UI layer goes to the
+        // proxy swap chain, the frame before it is the HUD-less colour.
+        #[cfg(feature = "diagnostics")]
+        if vertices == 3 && instances == 1 {
+            self.keep_frame_before_ui(list);
+            if self.ui_layer_to_proxy(list) {
+                return;
+            }
+        }
         let ready = self.prepare(list, false);
         // A pipeline with the rectangle geometry stage draws the title's
         // vertices as they are; any other gets its rectangles expanded.

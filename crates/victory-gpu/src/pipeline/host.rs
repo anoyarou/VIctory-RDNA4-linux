@@ -379,6 +379,11 @@ impl Stage {
 pub(crate) struct HostPipeline {
     /// A compute pipeline (else graphics).
     pub(crate) compute: bool,
+    /// Lays premultiplied colour over an RGBA8 target (blend ONE,
+    /// INV_SRC_ALPHA, add): a title's UI layer put over its finished frame
+    /// (frame generation's HUD-less colour is the target before it).
+    #[cfg_attr(not(feature = "diagnostics"), allow(dead_code))]
+    pub(crate) over: bool,
     /// A mesh pipeline (graphics without vertex input).
     pub(crate) mesh: bool,
     pub(crate) pso: ID3D12PipelineState,
@@ -636,6 +641,7 @@ impl HostPipeline {
             tracing::info!(?shaders, "host pipeline");
             crate::host::name(&pso, || format!("{shaders:?}"));
             return Some(HostPipeline {
+                over: false,
                 compute: true,
                 mesh: false,
                 pso,
@@ -689,6 +695,7 @@ impl HostPipeline {
             tracing::info!(?shaders, "host mesh pipeline");
             crate::host::name(&pso, || format!("{shaders:?}"));
             return Some(HostPipeline {
+                over: false,
                 compute: false,
                 mesh: true,
                 pso,
@@ -805,6 +812,15 @@ impl HostPipeline {
             "host graphics state"
         );
         Some(HostPipeline {
+            over: {
+                let b = &g.blend.RenderTarget[0];
+                g.targets.NumRenderTargets == 1
+                    && g.targets.RTFormats[0] == windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R8G8B8A8_UNORM
+                    && b.BlendEnable.as_bool()
+                    && b.SrcBlend == D3D12_BLEND_ONE
+                    && b.DestBlend == D3D12_BLEND_INV_SRC_ALPHA
+                    && b.BlendOp == D3D12_BLEND_OP_ADD
+            },
             compute: false,
             mesh: false,
             pso,
