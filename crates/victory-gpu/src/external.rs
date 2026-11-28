@@ -40,6 +40,23 @@ impl Recording<'_> {
     }
 
     /// Access flushes any pending host barriers before the provider runs.
+    /// Frame generation (diagnostics): an upscale recorded here with its
+    /// depth and motion textures (title resources) and constants feeds the
+    /// next present's generated frame, once the list has run. Nothing when
+    /// it is off. From Slaktarn700/SlaktarnVI `e5b0dc81`.
+    #[cfg(feature = "diagnostics")]
+    pub fn frame_generation_inputs(&self, depth: This, motion: This, frame: FrameInputs) {
+        if !crate::framegen::enabled() {
+            return;
+        }
+        let (Some(depth), Some(motion)) =
+            (crate::resource::host_copy(depth), crate::resource::host_copy(motion))
+        else {
+            return;
+        };
+        crate::framegen::record(self.0, crate::framegen::Inputs { depth, motion, frame, pose: None });
+    }
+
     pub fn commands(&self) -> &ID3D12GraphicsCommandList {
         &self.0.list
     }
@@ -68,4 +85,30 @@ pub fn record<R>(list: This, f: impl FnOnce(&Recording<'_>) -> R) -> Option<R> {
         state.external_compute();
     });
     out
+}
+
+/// What frame generation needs of an upscaled frame besides its depth and
+/// motion vectors: the upscale's constants (as its description has them)
+/// and the motion and depth bits of its creation flags.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FrameInputs {
+    pub render: [u32; 2],
+    pub jitter: [f32; 2],
+    pub motion_scale: [f32; 2],
+    pub frame_time_ms: f32,
+    pub reset: bool,
+    /// Near, far, vertical field of view, metres per view-space unit.
+    pub camera: [f32; 4],
+    pub flags: u32,
+    /// The FidelityFX descriptions of the depth and motion textures.
+    pub depth_desc: [u32; 8],
+    pub motion_desc: [u32; 8],
+}
+
+/// Turns on AMD frame generation for upscaled frames (diagnostics) with
+/// `amd_fidelityfx_framegeneration_dx12.dll` from `dir`: the presenter's
+/// swap chain becomes its proxy. The DLL's path, or why not.
+#[cfg(feature = "diagnostics")]
+pub fn use_frame_generation(dir: &std::path::Path) -> Result<String, String> {
+    crate::framegen::load(dir, false)
 }

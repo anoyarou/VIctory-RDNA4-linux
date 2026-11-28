@@ -11,8 +11,10 @@
 //! title's command list and resources (their host list and host copies, in
 //! the states the title gives, see `victory_gpu::external`). The rest passes
 //! through unchanged: sizes, flags, jitter, motion-vector scale, camera
-//! values, the resource descriptions, the context. Only the upscaler: other
-//! effects (frame generation) are refused.
+//! values, the resource descriptions, the context. Only the upscaler runs as a
+//! title effect; with `VICTORY_FIDELITYFX_FRAMEGEN=1` (diagnostics) its
+//! frames feed AMD frame generation on the presenter (`victory_gpu::framegen`,
+//! from Slaktarn700/SlaktarnVI `e5b0dc81`).
 #![allow(non_snake_case)]
 // Title code calls these through its import table.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
@@ -244,6 +246,16 @@ pub fn use_host_dir(dir: &Path) -> Result<(), String> {
         );
     }
     tracing::info!(folder = %dir.display(), version, "FidelityFX: selected PC upscaler");
+    // Frame generation on the upscaled frames (diagnostics), ported from
+    // Slaktarn700/SlaktarnVI `e5b0dc81`: `VICTORY_FIDELITYFX_FRAMEGEN=1`
+    // with `amd_fidelityfx_framegeneration_dx12.dll` in `dir`.
+    #[cfg(feature = "diagnostics")]
+    if std::env::var("VICTORY_FIDELITYFX_FRAMEGEN").as_deref() == Ok("1") {
+        match victory_gpu::external::use_frame_generation(dir) {
+            Ok(dll) => tracing::info!(dll, "FidelityFX: frame generation on the title's upscaled frames"),
+            Err(why) => tracing::warn!("FidelityFX frame generation: {why}; off"),
+        }
+    }
     Ok(())
 }
 
@@ -675,6 +687,9 @@ fn record_dispatch(
     output_size: [u32; 2],
 ) -> u32 {
     let output = dispatch.resources[6].resource.cast::<Object>();
+    // The title's description, before its resources become host ones.
+    #[cfg(feature = "diagnostics")]
+    let title = *dispatch;
     // Alive for the call (the list holds them too).
     let mut textures = Vec::new();
     let mut backing_extents = [None; 7];
@@ -735,6 +750,12 @@ fn record_dispatch(
     let code = unsafe { (host.dispatch)(context, &raw mut dispatch.header) };
     if code == OK {
         victory_gpu::external::output_written(output);
+        #[cfg(feature = "diagnostics")]
+        list.frame_generation_inputs(
+            title.resources[1].resource.cast::<Object>(),
+            title.resources[2].resource.cast::<Object>(),
+            frame_inputs(&title, ctx.creation.description.flags),
+        );
         ctx.first_dispatch.call_once(|| {
             tracing::info!(render = ?dispatch.render_size, output = ?output_size, ?backing_extents,
                 jitter = ?dispatch.jitter, motion_vector_scale = ?dispatch.motion_scale,
@@ -748,6 +769,26 @@ fn record_dispatch(
         );
     }
     code
+}
+
+/// What frame generation needs of an upscaling: its constants (`settings`
+/// in the order of `ffxDispatchDescUpscale`: sharpening, sharpness, frame
+/// time, pre-exposure, reset, camera, flags) and its context's creation
+/// `flags`. After Slaktarn700/SlaktarnVI `e5b0dc81`.
+#[cfg(feature = "diagnostics")]
+fn frame_inputs(d: &DispatchUpscale, flags: u32) -> victory_gpu::external::FrameInputs {
+    let f = |i: usize| f32::from_bits(d.settings[i]);
+    victory_gpu::external::FrameInputs {
+        render: d.render_size,
+        jitter: d.jitter,
+        motion_scale: d.motion_scale,
+        frame_time_ms: f(2),
+        reset: d.settings[4] & 0xff != 0,
+        camera: [f(5), f(6), f(7), f(8)],
+        flags,
+        depth_desc: d.resources[1].description,
+        motion_desc: d.resources[2].description,
+    }
 }
 
 pub(crate) fn module() -> HleModule {

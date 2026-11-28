@@ -41,6 +41,8 @@ mod faultbook;
 mod cores;
 pub mod descriptor;
 pub mod device;
+#[cfg(all(windows, feature = "diagnostics"))]
+mod framegen;
 #[cfg(windows)]
 mod draw;
 pub mod dxgi;

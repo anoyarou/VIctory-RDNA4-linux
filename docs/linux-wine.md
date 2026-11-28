@@ -375,3 +375,18 @@ system memory, unconfirmed).
 - Fewer kernel submissions (~3.5 per submission of ours); the draws' 9-22 % slowdown over PCIe 3.0, only once the
   card limits the frame.
 - Rebase `patches/wine` with each Proton update (configure with Vulkan).
+
+## FSR frame generation (diagnostics, off by default)
+
+Hand-ported from Slaktarn700/SlaktarnVI `e5b0dc81` (GPL-3.0; no shared
+history): `crates/victory-gpu/src/framegen.rs` (+ `framegen/camera.rs`),
+`HostList::move_texture`, the presenter hooks in `host.rs`
+(`Presentation::create`, `keep_hudless`, `prepare`, `presented`) and the
+upscale's constants from `victory-hle`'s `fidelityfx.rs`. Turn on with
+`VICTORY_FIDELITYFX_FRAMEGEN=1` beside `VICTORY_FIDELITYFX_DIR`, which must
+also hold `amd_fidelityfx_framegeneration_dx12.dll` (AMD FidelityFX SDK 2.4,
+`Kits/FidelityFX/signedbin` in GPUOpen-LibrariesAndSDKs/FidelityFX-SDK).
+Left out: SlaktarnVI's UI-layer split (`draw.rs` `keep_frame_before_ui`,
+`ui_layer_to_proxy`; so the HUD is interpolated with the frame), the ML
+mode `=4` with its camera capture, the panel's shown-frame rate and
+`VICTORY_FG_SENT_AHEAD` (presents stay sent ahead as before). Untested.
