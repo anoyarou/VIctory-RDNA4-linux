@@ -28,13 +28,16 @@ Tested on one machine:
 | Direct3D 12 | vkd3d-proton's `d3d12core.dll` with dxil-spirv `b540c8a2` and [`patches/vkd3d-proton`](patches/README.md) |
 | Upscaler | PC FSR 4.1.2: 1920x1080 inside, 3840x2160 out |
 
-| Scene | Frame time (rendered) | Shown with frame generation |
-|---|---|---|
-| Standing outdoors (~6,500-8,700 draws) | 56-60 ms (17-18 fps) | ~34-36 fps |
-| Busy scenes (~7,500-9,500 draws) | 80-86 ms (12 fps) | ~24 fps |
-| Memory | game process 14-16 GB resident | |
+| Scene | Frame time |
+|---|---|
+| Standing in the house (~7,100 draws) | 52-54 ms (19 fps) |
+| Walking in the house, camera turning (3,000-8,500 draws) | 48-66 ms (15-21 fps) |
+| Standing outdoors (~6,500-8,700 draws) | 56-60 ms (17-18 fps) |
+| Busy outdoor scenes (~7,500-9,500 draws) | 80-86 ms (12 fps) |
+| Memory | game process 14-16 GB resident |
 
-Every rendered frame gets one generated frame. It looks smooth, but input still follows the rendered rate.
+Frame generation (`VICTORY_FIDELITYFX_FRAMEGEN=1`) works and roughly doubles the shown frames, but at
+this frame rate it flickers while moving, so it is off for now.
 
 Faces, skin and clothes look right, plants no longer pop, night skies are right, the picture is sharp
 with FSR 4, and the game's UI stays steady with frame generation. The CPU sets the frame, not the card:
