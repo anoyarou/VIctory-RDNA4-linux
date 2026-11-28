@@ -26,7 +26,7 @@ Tested on one machine:
 | Driver | Mesa 26.2.8 RADV |
 | Wine | Proton Experimental `experimental-11.0-20261112` with the view-tree wineserver and [`patches/wine`](patches/README.md), in gamescope |
 | Direct3D 12 | vkd3d-proton's `d3d12core.dll` with dxil-spirv `b540c8a2` and [`patches/vkd3d-proton`](patches/README.md) |
-| Upscaler | PC FSR 4.1.2: 1920x1080 inside, 3840x2160 out; FSR frame generation on |
+| Upscaler | PC FSR 4.1.2: 1920x1080 inside, 3840x2160 out |
 
 | Scene | Frame time (rendered) | Shown with frame generation |
 |---|---|---|

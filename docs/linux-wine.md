@@ -39,7 +39,6 @@ first (see the scripts' headers). The fastest setup so far:
 
 ```bash
 export VICTORY_PORT_CONSTANTS=1 VICTORY_PORT_SECTION=1 VICTORY_PORT_CONSTANTS_ORDER_BATCH=1
-export VICTORY_FIDELITYFX_FRAMEGEN=1        # frame generation, if you have the DLL
 export VICTORY_AMBIENT=0.75 VICTORY_AMBIENT_AIR=1.5 VICTORY_AMBIENT_REFLECT=1.0
 scripts/linux/run-logged.sh play
 ```
@@ -58,7 +57,7 @@ The first line needs the patched Wine and vkd3d-proton; without them leave it ou
 | `VICTORY_CARD_BUFFERS_MIN_KB=64`, `VICTORY_CARD_BUFFERS_MB=4096` | A little faster, textures right. |
 | `VICTORY_PORT_CONSTANTS=1` + `VICTORY_PORT_SECTION=1` + `VICTORY_PORT_CONSTANTS_ORDER_BATCH=1` | The fastest setup (about 13 % faster). Port 1's heap goes to the card as a dma-buf instead of a buffer the kernel walks at every submission, and its draws' clamps run in one pass. `PORT_CONSTANTS=1` alone, or without the patches, is slower than off. |
 | `VICTORY_FSR_4K=quality\|balanced\|performance` with `FSR4_UPGRADE=1` | PC FSR 4.1.2 (`run.sh`; default `performance`: 1080p inside, 4K out). Without `FSR4_UPGRADE=1` Proton offers only FSR 3.1.5. |
-| `VICTORY_FIDELITYFX_FRAMEGEN=1` | FSR frame generation (from Slaktarn700/SlaktarnVI). Roughly doubles the shown frames; feels poor when the real frame rate is low. The game's UI and the stats panel are kept out of the interpolation (`VICTORY_FG_UI_LAYER=0`: not). |
+| `VICTORY_FIDELITYFX_FRAMEGEN=1` | FSR frame generation (from Slaktarn700/SlaktarnVI). Roughly doubles the shown frames; flickers while moving at today's base frame rate, so not recommended yet. The game's UI and the stats panel are kept out of the interpolation (`VICTORY_FG_UI_LAYER=0`: not). |
 | `VICTORY_AMBIENT=0.75`, `VICTORY_AMBIENT_AIR=1.5`, `VICTORY_AMBIENT_REFLECT=1.0` | Light without ray tracing (the settings of crossducking/RAZDA4A-XEN). Don't add a `,floor:` to `VICTORY_AMBIENT`: night skies go black. |
 | `VICTORY_STALE_TEXTURES=start` | The old rule that left some flags, walls and clothes black (MTrv0/VIctory-AMD-UM). Leave unset. |
 | `GAMESCOPE_MODE=windowed\|borderless\|fullscreen`, `GAMESCOPE_OUT_W/H` | Window mode and size (`run.sh`). Super+F toggles fullscreen. |
