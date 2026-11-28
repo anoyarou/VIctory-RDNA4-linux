@@ -68,7 +68,7 @@ Leave these off: `VICTORY_SUBMIT_FRAMES=2` (waxy faces, no gain), `VICTORY_PORT_
 
 ## Known problems
 
-- With frame generation the screen's edges flicker (strongest at the bottom) and full-screen effects such as the vignette can tear between frames.
+- With frame generation, while moving, the screen's edges and fast near objects flicker: the base frame rate (~17 fps) is far below the ~60 fps frame generation is made for, so the generated frames guess wrong where things move far. Still images are clean. Map markers, being part of the UI layer, move at the base rate.
 - ~330 draws a frame are dropped (the ray-tracing builder is off), so indoor light is an approximation.
 - Loading the world takes over 40 s; memory grows with play time.
 - The CPU sets the frame: one submitting thread, much of it Wine's cost of noticing the title's memory writes.
