@@ -37,16 +37,15 @@ Tested on one machine:
 | Busy outdoor scenes (~7,500-9,500 draws) | 80-86 ms (12 fps) |
 | Memory | game process 14-16 GB resident |
 
+The outdoor rows were measured with frame generation on (the rendered frame, not the shown one).
 Frame generation (`VICTORY_FIDELITYFX_FRAMEGEN=1`) works and roughly doubles the shown frames, but at
 this frame rate it flickers while moving, so it is off for now.
 
-Faces, skin and clothes look right, plants no longer pop, night skies are right, the picture is sharp
-with FSR 4, and the game's UI stays steady with frame generation. The CPU sets the frame, not the card:
-one thread prepares and submits the title's work.
+Faces, skin and clothes look right, plants no longer pop, night skies are right, and the picture is
+sharp with FSR 4. The CPU sets the frame, not the card: one thread prepares and submits the title's work.
 
-Known to be wrong: with frame generation the edges of the screen flicker and full-screen effects such as the vignette can tear; ~330 draws a
-frame are dropped (the ray-tracing builder is off), so indoor light is an approximation; loading the
-world takes over 40 s, and memory grows with play time.
+Known to be wrong: ~330 draws a frame are dropped (the ray-tracing builder is off), so indoor light is
+an approximation; loading the world takes over 40 s, and memory grows with play time.
 
 ## How to run it on Linux
 
