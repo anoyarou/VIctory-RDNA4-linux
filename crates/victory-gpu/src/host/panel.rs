@@ -731,6 +731,11 @@ pub(super) struct Panel {
     changed: bool,
     buffers: Option<Buffers>,
     failed: bool,
+    /// Frame generation: the box for the title's UI layer (RGBA8), which the
+    /// proxy lays over every frame shown, after the box on the frame.
+    over: Option<Buffers>,
+    over_changed: bool,
+    over_failed: bool,
 }
 
 impl Panel {
@@ -750,6 +755,9 @@ impl Panel {
             changed: false,
             buffers: None,
             failed: false,
+            over: None,
+            over_changed: false,
+            over_failed: false,
         }
     }
 
@@ -850,6 +858,7 @@ impl Panel {
             history_ms: self.history.iter().copied().collect(),
         });
         self.changed = true;
+        self.over_changed = true;
         (self.since, self.frames, self.worst) = (now, 0, 0.0);
         self.cost = now.elapsed();
     }
@@ -875,16 +884,59 @@ impl Panel {
         // Not the title's: the frame recorder leaves it out.
         #[cfg(feature = "diagnostics")]
         let _ours = crate::replay::record::unrecorded();
-        let scale = scale(height);
-        if self.buffers.as_ref().is_none_or(|b| (b.format, b.scale) != (format, scale)) {
-            // (What the card may still read stays: a picture's size changes once or twice in a run.)
-            std::mem::forget(self.buffers.take());
-            self.buffers = Buffers::new(host, format, scale);
-            self.failed = self.buffers.is_none();
-            self.changed = true;
+        self.failed = !onto(&mut self.buffers, &mut self.changed, snap, host, list, back, (width, height), format);
+        // With frame generation the title's UI layer is laid over every frame
+        // shown, after this (its cutscene bars hid the top of the box, the
+        // health bar lay over it): the box goes onto that layer too
+        // (Slaktarn700/SlaktarnVI e5b0dc81, host/panel.rs).
+        #[cfg(feature = "diagnostics")]
+        if !self.over_failed
+            && let Some((layer, read)) = crate::framegen::ui_layer_ahead([width, height])
+        {
+            // SAFETY: an open list; the layer is live and in `read` between
+            // the lists that use it.
+            unsafe { list.list.ResourceBarrier(&[transition(&layer, read, D3D12_RESOURCE_STATE_COPY_DEST)]) };
+            self.over_failed = !onto(
+                &mut self.over,
+                &mut self.over_changed,
+                snap,
+                host,
+                list,
+                &layer,
+                (width, height),
+                windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R8G8B8A8_UNORM,
+            );
+            // SAFETY: as above.
+            unsafe { list.list.ResourceBarrier(&[transition(&layer, D3D12_RESOURCE_STATE_COPY_DEST, read)]) };
+            list.keep(&layer);
         }
-        let Some(buffers) = &mut self.buffers else { return };
-        if std::mem::take(&mut self.changed) {
+        self.cost += began.elapsed();
+    }
+}
+
+/// The box onto `back` (that size and format, in the state to be copied
+/// into) from `buffers_slot` (made and filled as needed); false if they
+/// could not be made.
+#[allow(clippy::too_many_arguments)]
+fn onto(
+    buffers_slot: &mut Option<Buffers>,
+    changed: &mut bool,
+    snap: &Snapshot,
+    host: &Host,
+    list: &HostList,
+    back: &ID3D12Resource,
+    (width, height): (u32, u32),
+    format: DXGI_FORMAT,
+) -> bool {
+        let scale = scale(height);
+        if buffers_slot.as_ref().is_none_or(|b| (b.format, b.scale) != (format, scale)) {
+            // (What the card may still read stays: a picture's size changes once or twice in a run.)
+            std::mem::forget(buffers_slot.take());
+            *buffers_slot = Buffers::new(host, format, scale);
+            *changed = true;
+        }
+        let Some(buffers) = buffers_slot.as_mut() else { return false };
+        if std::mem::take(changed) {
             buffers.write(snap);
         }
         let (w, h) = size(scale);
@@ -938,8 +990,7 @@ impl Panel {
             };
             list.CopyTextureRegion(&to, 0, 0, 0, &from, Some(&part));
         }
-        self.cost += began.elapsed();
-    }
+    true
 }
 
 /// How busy a core was between two reads of its (idle, kernel + user)
