@@ -1,14 +1,12 @@
 # VIctory on RDNA 4 under Linux
 
 A fork of [VIctory](https://github.com/Marvisak/VIctory), a compatibility layer that runs an Xbox
-Series title on a PC from files the user supplies. This one runs it **on Linux under Wine/Proton, on
-an AMD RDNA 4 card**. It is playable, slowly.
+Series title on a PC from files the user supplies. This fork runs it **on Linux under Wine/Proton, on
+an AMD RDNA 4 card**. It is "playable", check the frame time table for more information.
 
 **Upstream is [Marvisak/VIctory](https://github.com/Marvisak/VIctory)**: fixes are taken from there,
 and changes meant for everyone go there as pull requests. The tree started from
-avatarmanz/VIctory-7900XTX with Belobug/VIctory-Belobug-AMD's RX 9070 XT fixes; both repositories no
-longer open on GitHub (since 2026-11-27), but their work is in this history with its authors, and
-references such as `avatarmanz/VIctory-7900XTX#…` still name what was taken.
+Belobug/VIctory-Belobug-AMD with avatarmanz/VIctory-7900XTX's fixes.
 
 **This repository contains no game files, code or assets.** You need your own copy of the game. It is
 not affiliated with or endorsed by the game's developer or publisher.
@@ -37,12 +35,8 @@ Tested on one machine:
 | Busy outdoor scenes (~7,500-9,500 draws) | 80-86 ms (12 fps) |
 | Memory | game process 14-16 GB resident |
 
-The outdoor rows were measured with frame generation on (the rendered frame, not the shown one).
 Frame generation (`VICTORY_FIDELITYFX_FRAMEGEN=1`) works and roughly doubles the shown frames, but at
 this frame rate it flickers while moving, so it is off for now.
-
-Faces, skin and clothes look right, plants no longer pop, night skies are right, and the picture is
-sharp with FSR 4. The CPU sets the frame, not the card: one thread prepares and submits the title's work.
 
 Known to be wrong: ~330 draws a frame are dropped (the ray-tracing builder is off), so indoor light is
 an approximation; loading the world takes over 40 s, and memory grows with play time.
